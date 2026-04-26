@@ -1,0 +1,5 @@
+Пора создать таблицу защит.
+📊 Рейд: {{RAID_NAME}}
+👥 Команд: {{TEAMS_COUNT}}
+🗂 Требуется {{ROWS}} строк × 3 столбца (итого {{TOTAL_SLOTS}} слотов)
+⏰ {{RECOMMENDED_SCHEDULE}} 

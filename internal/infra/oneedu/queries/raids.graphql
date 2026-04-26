@@ -1,0 +1,131 @@
+query GetRaidByName($name: String!, $startAt: timestamptz!) {
+  event(where: {
+    object: { type: { _eq: "raid" }, name: { _eq: $name } }
+    startAt: { _gte: $startAt }
+  }) {
+    id
+    groups {
+      captain {
+        login
+      }
+      group_status {
+        status
+      }
+      members {
+        id
+        userLogin
+      }
+    }
+    endAt
+    startAt
+    object { type, name }
+    parentId
+  }
+}
+
+query GetRaidsByPiscineGoId($id: Int!) {
+  event(where: {
+    object: {
+      type: { _eq: "raid" }
+      _or: [
+        { name: { _eq: "quad" } }
+        { name: { _eq: "sudoku" } }
+        { name: { _eq: "quadchecker" } }
+      ]
+    }
+    parent: { id: { _eq: $id } }
+  }) {
+    id
+    object { type, name }
+    parentId
+    groups {
+      captain {
+        login
+      }
+      group_status {
+        status
+      }
+      members {
+        id
+        userLogin
+      }
+    }
+    endAt
+    startAt
+  }
+}
+
+query GetRaidsByPiscineJsId($id: Int!) {
+  event(where: {
+    object: {
+      type: { _eq: "raid" }
+      _or: [
+        { name: { _eq: "crossword" } }
+        { name: { _eq: "clonernews" } }
+        { name: { _eq: "sortable" } }
+      ]
+    }
+    parent: { id: { _eq: $id } }
+  }) {
+    id
+    object { type, name }
+    parentId
+    groups {
+      captain {
+        login
+      }
+      group_status {
+        status
+      }
+      members {
+        id
+        userLogin
+      }
+    }
+    endAt
+    startAt
+  }
+}
+
+query GetRaidsByPiscineAiId($id: Int!) {
+  event(where: {
+    object: {
+      type: { _eq: "raid" }
+      _or: [
+        { name: { _eq: "backtesting-sp500" } }
+        { name: { _eq: "forest-prediction" } }
+      ]
+    }
+    parent: { id: { _eq: $id } }
+  }) {
+    id
+    object { type, name }
+    parentId
+    groups {
+      captain {
+        login
+      }
+      group_status {
+        status
+      }
+      members {
+        id
+        userLogin
+      }
+    }
+    endAt
+    startAt
+  }
+}
+
+query GetCurrentPiscineId($name: String!) {
+  event(where: {
+    object: { name: { _eq: $name } }
+    startAt: { _lte: "now()" }
+    endAt: { _gte: "now()" }
+  }) {
+    id
+    startAt
+    endAt
+  }
+}
