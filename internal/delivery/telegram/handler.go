@@ -43,8 +43,8 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidgo — информация о рейде Piscine Go\n" +
 		"/raidjs — информация о рейде Piscine JS\n" +
 		"/raidai — информация о рейде Piscine AI\n" +
-		"/week — текущая неделя для всех Piscine\n"+
-		"/create_table_raidgo"
+		"/week — текущая неделя для всех Piscine\n" +
+		"/create_tables — создать Google Sheets таблицы защит для всех активных рейдов"
 
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send help failed", "err", err)
@@ -91,6 +91,70 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send week info failed", "err", err)
 	}
+}
+
+// CreateTables handles the /create_tables command.
+// It iterates over all known Piscines, finds the active raid for each one
+// (if any), and creates a Google Sheets defense table per raid.
+// The user receives a single message with a per-raid result line.
+func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.Update) {
+	chatID := update.Message.Chat.ID
+
+	if h.sheets == nil {
+		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env")
+		return
+	}
+
+	// Defense is on Monday — the same date for all tables created in this run.
+	defenseDate := nextMonday(time.Now())
+
+	var lines []string
+	createdCount := 0
+
+	for _, piscine := range domain.AllPiscines() {
+		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
+		if err != nil {
+			h.logger.Warn("detect week failed", "piscine", piscine, "err", err)
+			lines = append(lines, fmt.Sprintf("❌ Ошибка при создании таблицы (%s): %v", piscine, err))
+			continue
+		}
+
+		// Skip piscines without an active raid (e.g. final exam week or between raids).
+		if weekInfo.ActiveRaid == nil {
+			h.logger.Info("skip: no active raid", "piscine", piscine)
+			continue
+		}
+
+		raid := weekInfo.ActiveRaid
+		schedule := usecase.CalculateDefenseSchedule(raid.TeamsCount)
+
+		url, err := h.sheets.CreateDefenseTable(ctx, sheets.DefenseTableParams{
+			RaidName:    raid.RaidName,
+			DefenseDate: defenseDate,
+			Schedule:    schedule,
+		})
+		if err != nil {
+			h.logger.Error("create defense table failed", "piscine", piscine, "raid", raid.RaidName, "err", err)
+			lines = append(lines, fmt.Sprintf("❌ Ошибка при создании таблицы (%s): %v", piscine, err))
+			continue
+		}
+
+		createdCount++
+		lines = append(lines, fmt.Sprintf("✅ Таблица создана (%s — %s): %s", piscine, raid.RaidName, url))
+	}
+
+	var resp string
+	if len(lines) == 0 {
+		resp = "ℹ️ На этой неделе нет активных рейдов — создавать нечего."
+	} else {
+		resp = strings.Join(lines, "\n")
+	}
+
+	if err := h.adapter.SendMessage(ctx, chatID, resp); err != nil {
+		h.logger.Error("send create_tables result failed", "err", err)
+	}
+
+	h.logger.Info("create_tables finished", "created", createdCount, "total_lines", len(lines))
 }
 
 // --- Callback Queries (inline keyboard buttons) ---
