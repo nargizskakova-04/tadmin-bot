@@ -6,17 +6,21 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 //go:embed *.graphql
 var FS embed.FS
 
-// queryCache stores parsed queries so we only parse the file once.
-var queryCache map[string]string
-
-// reQuery matches a named GraphQL query/mutation block.
-// It captures: "query OperationName(...) { ... }"
+// reQuery matches the start of a named GraphQL query/mutation block.
+// Capture group 2 is the operation name.
 var reQuery = regexp.MustCompile(`(?s)(query|mutation)\s+(\w+)\s*(\([^)]*\))?\s*\{`)
+
+// fileCache stores parsed operations per file. Concurrent-safe.
+var (
+	cacheMu    sync.RWMutex
+	parsedFile = map[string]map[string]string{}
+)
 
 // MustLoad reads the entire .graphql file by name.
 func MustLoad(name string) (string, error) {
@@ -28,57 +32,68 @@ func MustLoad(name string) (string, error) {
 }
 
 // LoadOperation extracts a single named operation from the .graphql file.
-// For example: LoadOperation("raids.graphql", "GetCurrentPiscineId")
+// For example: LoadOperation("raids.graphql", "GetCurrentPiscineId").
 func LoadOperation(file, operationName string) (string, error) {
-	if queryCache == nil {
-		if err := parseAll(file); err != nil {
-			return "", err
-		}
+	ops, err := opsFor(file)
+	if err != nil {
+		return "", err
 	}
-
-	q, ok := queryCache[operationName]
+	q, ok := ops[operationName]
 	if !ok {
 		return "", fmt.Errorf("operation %q not found in %q", operationName, file)
 	}
 	return q, nil
 }
 
-// parseAll reads the file and splits it into individual named operations.
-func parseAll(file string) error {
+// opsFor returns the parsed operation map for a file, caching across calls.
+func opsFor(file string) (map[string]string, error) {
+	cacheMu.RLock()
+	ops, ok := parsedFile[file]
+	cacheMu.RUnlock()
+	if ok {
+		return ops, nil
+	}
+
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	// Re-check after acquiring the write lock to avoid double-parsing.
+	if ops, ok := parsedFile[file]; ok {
+		return ops, nil
+	}
+
+	ops, err := parseFile(file)
+	if err != nil {
+		return nil, err
+	}
+	parsedFile[file] = ops
+	return ops, nil
+}
+
+// parseFile reads the file and splits it into individual named operations.
+func parseFile(file string) (map[string]string, error) {
 	raw, err := MustLoad(file)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	queryCache = make(map[string]string)
-
-	// Find all operation start positions.
-	matches := reQuery.FindAllStringIndex(raw, -1)
+	matches := reQuery.FindAllStringSubmatchIndex(raw, -1)
 	if len(matches) == 0 {
-		return fmt.Errorf("no named operations found in %q", file)
+		return nil, fmt.Errorf("no named operations found in %q", file)
 	}
 
-	for i, loc := range matches {
-		// Extract operation name from the match.
-		matchStr := raw[loc[0]:loc[1]]
-		nameMatch := reQuery.FindStringSubmatch(matchStr)
-		if len(nameMatch) < 3 {
-			continue
-		}
-		opName := nameMatch[2]
+	ops := make(map[string]string, len(matches))
+	for i, m := range matches {
+		// m holds index pairs for [whole, kind, name, params]; the name is group 2.
+		nameStart, nameEnd := m[4], m[5]
+		opName := raw[nameStart:nameEnd]
 
-		// The operation body goes from this match start to the next match start
-		// (or end of file for the last one).
-		start := loc[0]
-		var end int
+		blockStart := m[0]
+		blockEnd := len(raw)
 		if i+1 < len(matches) {
-			end = matches[i+1][0]
-		} else {
-			end = len(raw)
+			blockEnd = matches[i+1][0]
 		}
-
-		queryCache[opName] = strings.TrimSpace(raw[start:end])
+		ops[opName] = strings.TrimSpace(raw[blockStart:blockEnd])
 	}
 
-	return nil
+	return ops, nil
 }

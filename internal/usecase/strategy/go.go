@@ -16,9 +16,3 @@ func NewGoStrategy() *GoStrategy {
 		},
 	}
 }
-
-func (s *GoStrategy) Type() domain.PiscineType { return domain.PiscineGo }
-
-func (s *GoStrategy) TemplateVars(msgType domain.MessageType, info *domain.RaidInfo, extra map[string]string) map[string]string {
-	return buildCommonVars(info, extra)
-}

@@ -1,0 +1,107 @@
+package oneedu
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+)
+
+func makeJWT(t *testing.T, claims map[string]interface{}) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payloadJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadJSON)
+	sig := base64.RawURLEncoding.EncodeToString([]byte("sig"))
+	return header + "." + payload + "." + sig
+}
+
+func TestParseJWTExpiry_Valid(t *testing.T) {
+	want := time.Unix(1_900_000_000, 0)
+	tok := makeJWT(t, map[string]interface{}{"exp": want.Unix(), "sub": "x"})
+
+	got, err := parseJWTExpiry(tok)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Errorf("parseJWTExpiry: got %v, want %v", got, want)
+	}
+}
+
+func TestParseJWTExpiry_HandlesUnpaddedBase64URL(t *testing.T) {
+	// 5-char payload would need padding under StdEncoding. RawURLEncoding handles it.
+	// We deliberately exercise the case by using a small payload.
+	tok := makeJWT(t, map[string]interface{}{"exp": 12345})
+	if _, err := parseJWTExpiry(tok); err != nil {
+		t.Fatalf("parseJWTExpiry on small payload failed: %v", err)
+	}
+}
+
+func TestParseJWTExpiry_InvalidShape(t *testing.T) {
+	cases := []string{
+		"",
+		"abc",
+		"only.two",
+		"way.too.many.parts.here",
+	}
+	for _, c := range cases {
+		c := c
+		t.Run("malformed/"+c, func(t *testing.T) {
+			if _, err := parseJWTExpiry(c); err == nil {
+				t.Errorf("expected error for %q, got nil", c)
+			}
+		})
+	}
+}
+
+func TestParseJWTExpiry_BadBase64(t *testing.T) {
+	tok := "header." + "!!!not_base64!!!" + ".sig"
+	if _, err := parseJWTExpiry(tok); err == nil {
+		t.Error("expected base64 decode error, got nil")
+	}
+}
+
+func TestParseJWTExpiry_NoExpClaim(t *testing.T) {
+	tok := makeJWT(t, map[string]interface{}{"sub": "x"})
+	if _, err := parseJWTExpiry(tok); err == nil {
+		t.Error("expected error when exp claim missing, got nil")
+	}
+}
+
+func TestExtractToken(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"raw", "abc.def.ghi", "abc.def.ghi"},
+		{"trailingNewline", "abc.def.ghi\n", "abc.def.ghi"},
+		{"jsonQuoted", `"abc.def.ghi"`, "abc.def.ghi"},
+		{"whitespaceAndQuotes", "  \"abc.def.ghi\"  \n", "abc.def.ghi"},
+		{"empty", "", ""},
+		{"justQuotes", `""`, ""},
+		// Edge case: token contains an internal quote — preserved.
+		{"internalQuote", `ab"cd.ef.gh`, `ab"cd.ef.gh`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractToken([]byte(tc.in))
+			if got != tc.want {
+				t.Errorf("extractToken(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseJWTExpiry_MentionsThreePartsInError(t *testing.T) {
+	_, err := parseJWTExpiry("a.b")
+	if err == nil || !strings.Contains(err.Error(), "3 parts") {
+		t.Errorf("error should mention expected part count, got: %v", err)
+	}
+}

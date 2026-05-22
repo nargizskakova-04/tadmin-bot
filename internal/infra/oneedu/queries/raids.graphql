@@ -123,6 +123,7 @@ query GetCurrentPiscineId($name: String!) {
     object: { name: { _eq: $name } }
     startAt: { _lte: "now()" }
     endAt: { _gte: "now()" }
+    path: {_iregex: "astanahub"}
   }) {
     id
     startAt

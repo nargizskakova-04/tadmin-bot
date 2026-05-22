@@ -54,36 +54,40 @@ func CalculateDefenseSchedule(teamsCount int) DefenseSchedule {
 }
 
 // computeBreaks determines after which rows breaks should be placed.
+//   - fewer than 5 rows: no break
+//   - 5–10 rows: one break, slightly biased toward the front when odd
+//   - more than 10 rows: two breaks, splitting into three roughly equal segments
 func computeBreaks(rows int) []int {
-	if rows < 5 {
+	const (
+		oneBreakMin = 5
+		oneBreakMax = 10
+	)
+
+	switch {
+	case rows < oneBreakMin:
 		return nil
+	case rows <= oneBreakMax:
+		// (rows+1)/2 == ceil(rows/2): for 5→3, 6→3, 7→4, 8→4, 9→5, 10→5.
+		return []int{(rows + 1) / 2}
+	default:
+		seg1, seg2, _ := splitIntoThree(rows)
+		return []int{seg1, seg1 + seg2}
 	}
+}
 
-	if rows <= 10 {
-		// 1 break: split in half; if odd, more rows before the break.
-		half := rows / 2
-		if rows%2 != 0 {
-			half = rows/2 + 1
-		}
-		return []int{half}
+// splitIntoThree splits n into three segments as equal as possible.
+// Any remainder is distributed to the earlier segments first.
+func splitIntoThree(n int) (a, b, c int) {
+	base := n / 3
+	rem := n % 3
+	a, b, c = base, base, base
+	if rem >= 1 {
+		a++
 	}
-
-	// 2 breaks: split into 3 roughly equal parts.
-	third := rows / 3
-	remainder := rows % 3
-
-	// Distribute remainder: first segments get +1.
-	seg1 := third
-	seg2 := third
-	// seg3 := third
-	if remainder >= 1 {
-		seg1++
+	if rem >= 2 {
+		b++
 	}
-	if remainder >= 2 {
-		seg2++
-	}
-
-	return []int{seg1, seg1 + seg2}
+	return a, b, c
 }
 
 // enforceMaxConsecutive ensures no more than maxConsecutiveRows consecutive rows

@@ -13,6 +13,16 @@ type baseStrategy struct {
 	totalWeeks   int
 }
 
+// Type returns the PiscineType this strategy handles.
+func (b *baseStrategy) Type() domain.PiscineType { return b.piscineType }
+
+// TemplateVars builds template variables for a given message type and raid info.
+// The default implementation simply uses the common variables; subtypes can
+// override if they need piscine-specific vars.
+func (b *baseStrategy) TemplateVars(_ domain.MessageType, info *domain.RaidInfo, extra map[string]string) map[string]string {
+	return buildCommonVars(info, extra)
+}
+
 // SupportsMessage checks whether a message type is applicable for the given week.
 func (b *baseStrategy) SupportsMessage(msgType domain.MessageType, weekNumber int) bool {
 	isFinal := weekNumber == b.totalWeeks

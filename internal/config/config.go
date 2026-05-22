@@ -30,32 +30,20 @@ type Config struct {
 
 // Load reads configuration from the environment.
 func Load() (*Config, error) {
-	token := os.Getenv("TELEGRAM_TOKEN")
-	if token == "" {
-		return nil, fmt.Errorf("TELEGRAM_TOKEN is required")
+	token, err := requireEnv("TELEGRAM_TOKEN")
+	if err != nil {
+		return nil, err
 	}
 
-	eduURL := os.Getenv("ONEEDU_BASE_URL")
-	if eduURL == "" {
-		return nil, fmt.Errorf("ONEEDU_BASE_URL is required")
+	eduURL, err := requireEnv("ONEEDU_BASE_URL")
+	if err != nil {
+		return nil, err
 	}
-	if !strings.HasPrefix(eduURL, "http://") && !strings.HasPrefix(eduURL, "https://") {
-		eduURL = "https://" + eduURL
-	}
+	eduURL = ensureScheme(eduURL)
 
-	eduToken := os.Getenv("PLATFORM_ACCESS_TOKEN")
-	if eduToken == "" {
-		return nil, fmt.Errorf("PLATFORM_ACCESS_TOKEN is required")
-	}
-
-	tmplPath := os.Getenv("TEMPLATES_PATH")
-	if tmplPath == "" {
-		tmplPath = "messages"
-	}
-
-	tz := os.Getenv("TIMEZONE")
-	if tz == "" {
-		tz = "Asia/Almaty"
+	eduToken, err := requireEnv("PLATFORM_ACCESS_TOKEN")
+	if err != nil {
+		return nil, err
 	}
 
 	chatIDs, err := parseChatIDs(os.Getenv("CHAT_IDS"))
@@ -63,17 +51,40 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CHAT_IDS: %w", err)
 	}
 
-	googleCreds := os.Getenv("GOOGLE_CREDENTIALS_FILE")
-
 	return &Config{
 		TelegramToken:         token,
 		ChatIDs:               chatIDs,
 		OneEduBaseURL:         eduURL,
 		OneEduAccessToken:     eduToken,
-		TemplatesPath:         tmplPath,
-		Timezone:              tz,
-		GoogleCredentialsFile: googleCreds,
+		TemplatesPath:         envOr("TEMPLATES_PATH", "messages"),
+		Timezone:              envOr("TIMEZONE", "Asia/Almaty"),
+		GoogleCredentialsFile: os.Getenv("GOOGLE_CREDENTIALS_FILE"),
 	}, nil
+}
+
+// requireEnv reads an environment variable and errors if it's empty.
+func requireEnv(name string) (string, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	return v, nil
+}
+
+// envOr reads an environment variable and returns def when it's empty.
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
+// ensureScheme prepends "https://" if the URL has no http(s) scheme.
+func ensureScheme(url string) string {
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+		return url
+	}
+	return "https://" + url
 }
 
 func parseChatIDs(raw string) ([]int64, error) {

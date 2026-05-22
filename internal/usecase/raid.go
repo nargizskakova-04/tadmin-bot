@@ -44,7 +44,6 @@ type CurrentWeekInfo struct {
 // It fetches the active piscine, then its raids, and finds which raid
 // is currently active (startAt <= now <= endAt).
 func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.PiscineType) (*CurrentWeekInfo, error) {
-	// 1. Get active piscine event.
 	piscineInfo, err := uc.eduClient.GetCurrentPiscineID(ctx, piscine)
 	if err != nil {
 		return nil, fmt.Errorf("get piscine ID: %w", err)
@@ -53,35 +52,25 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 		return nil, fmt.Errorf("no active piscine found for %s", piscine)
 	}
 
-	// 2. Get all raids for this piscine.
 	raids, err := uc.eduClient.GetRaidsByPiscineID(ctx, piscine, piscineInfo.ID)
 	if err != nil {
 		return nil, fmt.Errorf("get raids: %w", err)
 	}
 
-	// 3. Find the active raid (startAt <= now <= endAt).
 	now := time.Now()
-	for _, raid := range raids {
-		if !raid.StartDate.After(now) && !raid.EndDate.Before(now) {
-			return &CurrentWeekInfo{
-				PiscineInfo: piscineInfo,
-				WeekNumber:  raid.WeekNumber,
-				ActiveRaid:  &raid,
-			}, nil
-		}
+
+	if active := findActiveRaid(raids, now); active != nil {
+		return &CurrentWeekInfo{
+			PiscineInfo: piscineInfo,
+			WeekNumber:  active.WeekNumber,
+			ActiveRaid:  active,
+		}, nil
 	}
 
-	// 4. No active raid — could be final exam week.
-	//    Determine week by checking how many raids have already ended.
-	endedCount := 0
-	for _, raid := range raids {
-		if raid.EndDate.Before(now) {
-			endedCount++
-		}
-	}
-	// If all raids have ended, it's the final week.
-	totalRaidWeeks := domain.TotalWeeks(piscine) - 1 // final week has no raid
-	if endedCount >= totalRaidWeeks {
+	// No active raid. If every raid has ended, it's the final-exam week.
+	// (Final week has no raid, so total raid weeks = TotalWeeks-1.)
+	totalRaidWeeks := domain.TotalWeeks(piscine) - 1
+	if countEndedRaids(raids, now) >= totalRaidWeeks {
 		return &CurrentWeekInfo{
 			PiscineInfo: piscineInfo,
 			WeekNumber:  domain.TotalWeeks(piscine),
@@ -89,24 +78,57 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 		}, nil
 	}
 
-	// 5. Between raids — find the next upcoming raid to determine week.
-	var nextRaid *domain.RaidInfo
-	for i := range raids {
-		if raids[i].StartDate.After(now) {
-			if nextRaid == nil || raids[i].StartDate.Before(nextRaid.StartDate) {
-				nextRaid = &raids[i]
-			}
-		}
-	}
-	if nextRaid != nil {
+	// We're between raids; the upcoming raid tells us which week we're in.
+	if next := findNextUpcomingRaid(raids, now); next != nil {
 		return &CurrentWeekInfo{
 			PiscineInfo: piscineInfo,
-			WeekNumber:  nextRaid.WeekNumber,
-			ActiveRaid:  nextRaid,
+			WeekNumber:  next.WeekNumber,
+			ActiveRaid:  next,
 		}, nil
 	}
 
 	return nil, fmt.Errorf("could not determine current week for %s", piscine)
+}
+
+// findActiveRaid returns a pointer to the raid currently in progress
+// (startAt <= now <= endAt), or nil. The returned pointer references a copy,
+// not the slice element, so the caller can hold onto it safely.
+func findActiveRaid(raids []domain.RaidInfo, now time.Time) *domain.RaidInfo {
+	for i := range raids {
+		r := raids[i]
+		if !r.StartDate.After(now) && !r.EndDate.Before(now) {
+			return &r
+		}
+	}
+	return nil
+}
+
+// countEndedRaids returns the number of raids whose EndDate is strictly before now.
+func countEndedRaids(raids []domain.RaidInfo, now time.Time) int {
+	n := 0
+	for i := range raids {
+		if raids[i].EndDate.Before(now) {
+			n++
+		}
+	}
+	return n
+}
+
+// findNextUpcomingRaid returns the earliest-starting raid whose StartDate is
+// after now, or nil if none.
+func findNextUpcomingRaid(raids []domain.RaidInfo, now time.Time) *domain.RaidInfo {
+	var best *domain.RaidInfo
+	for i := range raids {
+		r := raids[i]
+		if !r.StartDate.After(now) {
+			continue
+		}
+		if best == nil || r.StartDate.Before(best.StartDate) {
+			rCopy := r
+			best = &rCopy
+		}
+	}
+	return best
 }
 
 // BuildMessage builds a message of the given type for the given piscine.

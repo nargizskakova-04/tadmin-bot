@@ -17,6 +17,15 @@ import (
 	"admin-bot/internal/infra/oneedu/queries"
 )
 
+const (
+	httpTimeout        = 30 * time.Second
+	queriesFile        = "raids.graphql"
+	tokenExpiryLeeway  = 1 * time.Minute
+	authTokenPath      = "/api/auth/token"
+	authRefreshPath    = "/api/auth/refresh"
+	graphqlEndpointURL = "/api/graphql-engine/v1/graphql"
+)
+
 // Client communicates with the 01-edu GraphQL API.
 type Client struct {
 	httpClient  *http.Client
@@ -31,7 +40,7 @@ type Client struct {
 
 func NewClient(baseURL, accessToken string, logger *slog.Logger) *Client {
 	return &Client{
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		httpClient:  &http.Client{Timeout: httpTimeout},
 		baseURL:     baseURL,
 		accessToken: accessToken,
 		logger:      logger,
@@ -55,21 +64,10 @@ func (c *Client) RefreshToken(ctx context.Context) error {
 
 // GetCurrentPiscineID fetches the active piscine event by name.
 func (c *Client) GetCurrentPiscineID(ctx context.Context, piscine domain.PiscineType) (*domain.PiscineInfo, error) {
-	if err := c.ensureToken(ctx); err != nil {
-		return nil, err
-	}
-
-	query, err := queries.LoadOperation("raids.graphql", "GetCurrentPiscineId")
-	if err != nil {
-		return nil, fmt.Errorf("load query: %w", err)
-	}
-
-	vars := map[string]interface{}{
-		"name": string(piscine),
-	}
+	vars := map[string]interface{}{"name": string(piscine)}
 
 	var resp piscineResponse
-	if err := c.doGraphQL(ctx, query, vars, &resp); err != nil {
+	if err := c.runQuery(ctx, "GetCurrentPiscineId", vars, &resp); err != nil {
 		return nil, err
 	}
 
@@ -87,28 +85,16 @@ func (c *Client) GetCurrentPiscineID(ctx context.Context, piscine domain.Piscine
 }
 
 // GetRaidsByPiscineID fetches all raid events for a given piscine event ID.
-// Uses the piscine-specific query (GetRaidsByPiscineGoId, etc.).
 func (c *Client) GetRaidsByPiscineID(ctx context.Context, piscine domain.PiscineType, piscineEventID int) ([]domain.RaidInfo, error) {
-	if err := c.ensureToken(ctx); err != nil {
-		return nil, err
-	}
-
 	opName := domain.GetRaidQueryName(piscine)
 	if opName == "" {
 		return nil, fmt.Errorf("%w: %s", domain.ErrPiscineNotFound, piscine)
 	}
 
-	query, err := queries.LoadOperation("raids.graphql", opName)
-	if err != nil {
-		return nil, fmt.Errorf("load query %s: %w", opName, err)
-	}
-
-	vars := map[string]interface{}{
-		"id": piscineEventID,
-	}
+	vars := map[string]interface{}{"id": piscineEventID}
 
 	var resp raidsResponse
-	if err := c.doGraphQL(ctx, query, vars, &resp); err != nil {
+	if err := c.runQuery(ctx, opName, vars, &resp); err != nil {
 		return nil, err
 	}
 
@@ -116,37 +102,39 @@ func (c *Client) GetRaidsByPiscineID(ctx context.Context, piscine domain.Piscine
 	for _, ev := range resp.Data.Event {
 		raids = append(raids, mapEventToRaidInfo(piscine, ev))
 	}
-
 	return raids, nil
 }
 
 // GetRaidByName fetches a specific raid event by name.
 func (c *Client) GetRaidByName(ctx context.Context, name string, startAt string) (*domain.RaidInfo, error) {
-	if err := c.ensureToken(ctx); err != nil {
-		return nil, err
-	}
-
-	query, err := queries.LoadOperation("raids.graphql", "GetRaidByName")
-	if err != nil {
-		return nil, fmt.Errorf("load query: %w", err)
-	}
-
 	vars := map[string]interface{}{
 		"name":    name,
 		"startAt": startAt,
 	}
 
 	var resp raidsResponse
-	if err := c.doGraphQL(ctx, query, vars, &resp); err != nil {
+	if err := c.runQuery(ctx, "GetRaidByName", vars, &resp); err != nil {
 		return nil, err
 	}
 
 	if len(resp.Data.Event) == 0 {
 		return nil, nil
 	}
-
 	info := mapEventToRaidInfo("", resp.Data.Event[0])
 	return &info, nil
+}
+
+// runQuery is the common shape used by all GetX methods: ensure auth, load the
+// embedded query by name, and execute against the GraphQL endpoint.
+func (c *Client) runQuery(ctx context.Context, opName string, vars map[string]interface{}, dest interface{}) error {
+	if err := c.ensureToken(ctx); err != nil {
+		return err
+	}
+	query, err := queries.LoadOperation(queriesFile, opName)
+	if err != nil {
+		return fmt.Errorf("load query %s: %w", opName, err)
+	}
+	return c.doGraphQL(ctx, query, vars, dest)
 }
 
 // --- internal helpers ---
@@ -182,20 +170,20 @@ func mapEventToRaidInfo(piscine domain.PiscineType, ev raidEventNode) domain.Rai
 	}
 }
 
-func (c *Client) ensureToken(ctx context.Context) error {
+func (c *Client) tokenState() (token string, exp time.Time) {
 	c.mu.RLock()
-	valid := c.jwtToken != "" && time.Now().Before(c.jwtExp.Add(-1*time.Minute))
-	c.mu.RUnlock()
-	if valid {
+	defer c.mu.RUnlock()
+	return c.jwtToken, c.jwtExp
+}
+
+func (c *Client) ensureToken(ctx context.Context) error {
+	token, exp := c.tokenState()
+	if token != "" && time.Now().Before(exp.Add(-tokenExpiryLeeway)) {
 		return nil
 	}
 
-	// Try refresh first if we have an existing token.
-	c.mu.RLock()
-	hasToken := c.jwtToken != ""
-	c.mu.RUnlock()
-
-	if hasToken {
+	if token != "" {
+		// We have an expired/expiring token; try the cheaper refresh path first.
 		if err := c.refreshJWT(ctx); err != nil {
 			c.logger.Warn("refresh failed, requesting new token", "err", err)
 		} else {
@@ -211,7 +199,7 @@ func (c *Client) refreshJWT(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/auth/refresh", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+authRefreshPath, nil)
 	if err != nil {
 		return err
 	}
@@ -224,12 +212,11 @@ func (c *Client) refreshJWT(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("refresh endpoint returned %d: %s", resp.StatusCode, body)
 	}
 
-	token := strings.Trim(strings.TrimSpace(string(body)), "\"")
+	token := extractToken(body)
 	if token == "" {
 		return fmt.Errorf("empty token in refresh response")
 	}
@@ -245,27 +232,21 @@ func (c *Client) refreshJWT(ctx context.Context) error {
 	return nil
 }
 
+// extractToken trims whitespace and an optional surrounding pair of double quotes
+// (the endpoint sometimes returns the raw JWT, sometimes a JSON string literal).
+func extractToken(body []byte) string {
+	return strings.Trim(strings.TrimSpace(string(body)), `"`)
+}
+
 // parseJWTExpiry decodes the JWT payload and extracts the "exp" claim.
+// RawURLEncoding handles base64url *without* padding, which is what JWTs use.
 func parseJWTExpiry(token string) (time.Time, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return time.Time{}, fmt.Errorf("invalid JWT: expected 3 parts, got %d", len(parts))
 	}
 
-	// Base64url decode the payload (part[1]).
-	payload := parts[1]
-	// Add padding if needed.
-	switch len(payload) % 4 {
-	case 2:
-		payload += "=="
-	case 3:
-		payload += "="
-	}
-	// Replace url-safe characters.
-	payload = strings.ReplaceAll(payload, "-", "+")
-	payload = strings.ReplaceAll(payload, "_", "/")
-
-	decoded, err := base64Decode(payload)
+	decoded, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		return time.Time{}, fmt.Errorf("decode JWT payload: %w", err)
 	}
@@ -276,23 +257,14 @@ func parseJWTExpiry(token string) (time.Time, error) {
 	if err := json.Unmarshal(decoded, &claims); err != nil {
 		return time.Time{}, fmt.Errorf("unmarshal JWT claims: %w", err)
 	}
-
 	if claims.Exp == 0 {
 		return time.Time{}, fmt.Errorf("no exp claim in JWT")
 	}
-
 	return time.Unix(int64(claims.Exp), 0), nil
 }
 
-// base64Decode is a helper for standard base64 decoding.
-func base64Decode(s string) ([]byte, error) {
-	return io.ReadAll(
-		base64.NewDecoder(base64.StdEncoding, strings.NewReader(s)),
-	)
-}
-
 func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
-	url := fmt.Sprintf("%s/api/auth/token?token=%s", c.baseURL, c.accessToken)
+	url := fmt.Sprintf("%s%s?token=%s", c.baseURL, authTokenPath, c.accessToken)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -306,13 +278,11 @@ func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
 	if resp.StatusCode != http.StatusOK {
 		return "", time.Time{}, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, body)
 	}
 
-	// Response is a raw JWT string (possibly JSON-quoted).
-	token := strings.Trim(strings.TrimSpace(string(body)), "\"")
+	token := extractToken(body)
 	if token == "" {
 		return "", time.Time{}, fmt.Errorf("empty token in response")
 	}
@@ -321,7 +291,6 @@ func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("parse JWT: %w", err)
 	}
-
 	return token, exp, nil
 }
 
@@ -331,15 +300,12 @@ func (c *Client) doGraphQL(ctx context.Context, query string, variables map[stri
 		"variables": variables,
 	})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/graphql-engine/v1/graphql", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+graphqlEndpointURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 
-	c.mu.RLock()
-	token := c.jwtToken
-	c.mu.RUnlock()
-
+	token, _ := c.tokenState()
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 

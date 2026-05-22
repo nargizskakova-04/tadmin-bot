@@ -16,10 +16,3 @@ func NewJSStrategy() *JSStrategy {
 		},
 	}
 }
-
-func (s *JSStrategy) Type() domain.PiscineType { return domain.PiscineJS }
-
-func (s *JSStrategy) TemplateVars(msgType domain.MessageType, info *domain.RaidInfo, extra map[string]string) map[string]string {
-	return buildCommonVars(info, extra)
-}
-	

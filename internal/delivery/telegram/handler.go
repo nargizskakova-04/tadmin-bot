@@ -24,6 +24,8 @@ type Handler struct {
 	logger  *slog.Logger
 }
 
+const msgSheetsNotConfigured = "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env"
+
 func NewHandler(raidUC *usecase.RaidUseCase, adapter *tgAdapter.Adapter, sheetsClient *sheets.Client, logger *slog.Logger) *Handler {
 	return &Handler{
 		raidUC:  raidUC,
@@ -66,11 +68,11 @@ func (h *Handler) HandleRaidAI(ctx context.Context, b *bot.Bot, update *models.U
 func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID := update.Message.Chat.ID
 
-	var text string
+	var sb strings.Builder
 	for _, p := range domain.AllPiscines() {
 		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, p)
 		if err != nil {
-			text += fmt.Sprintf("❌ %s: %v\n", p, err)
+			fmt.Fprintf(&sb, "❌ %s: %v\n", p, err)
 			continue
 		}
 
@@ -79,16 +81,15 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 			raidName = weekInfo.ActiveRaid.RaidName
 		}
 
-		isFinal := domain.IsFinalWeek(p, weekInfo.WeekNumber)
 		weekLabel := fmt.Sprintf("Неделя %d", weekInfo.WeekNumber)
-		if isFinal {
+		if domain.IsFinalWeek(p, weekInfo.WeekNumber) {
 			weekLabel += " (Final Exam)"
 		}
 
-		text += fmt.Sprintf("📌 <b>%s</b>: %s | Рейд: %s\n", p, weekLabel, raidName)
+		fmt.Fprintf(&sb, "📌 <b>%s</b>: %s | Рейд: %s\n", p, weekLabel, raidName)
 	}
 
-	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
+	if err := h.adapter.SendMessage(ctx, chatID, sb.String()); err != nil {
 		h.logger.Error("send week info failed", "err", err)
 	}
 }
@@ -101,7 +102,7 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 	chatID := update.Message.Chat.ID
 
 	if h.sheets == nil {
-		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env")
+		_ = h.adapter.SendMessage(ctx, chatID, msgSheetsNotConfigured)
 		return
 	}
 
@@ -126,13 +127,7 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 		}
 
 		raid := weekInfo.ActiveRaid
-		schedule := usecase.CalculateDefenseSchedule(raid.TeamsCount)
-
-		url, err := h.sheets.CreateDefenseTable(ctx, sheets.DefenseTableParams{
-			RaidName:    raid.RaidName,
-			DefenseDate: defenseDate,
-			Schedule:    schedule,
-		})
+		url, err := h.createTableForActiveRaid(ctx, raid, defenseDate)
 		if err != nil {
 			h.logger.Error("create defense table failed", "piscine", piscine, "raid", raid.RaidName, "err", err)
 			lines = append(lines, fmt.Sprintf("❌ Ошибка при создании таблицы (%s): %v", piscine, err))
@@ -143,10 +138,8 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 		lines = append(lines, fmt.Sprintf("✅ Таблица создана (%s — %s): %s", piscine, raid.RaidName, url))
 	}
 
-	var resp string
-	if len(lines) == 0 {
-		resp = "ℹ️ На этой неделе нет активных рейдов — создавать нечего."
-	} else {
+	resp := "ℹ️ На этой неделе нет активных рейдов — создавать нечего."
+	if len(lines) > 0 {
 		resp = strings.Join(lines, "\n")
 	}
 
@@ -155,6 +148,17 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 	}
 
 	h.logger.Info("create_tables finished", "created", createdCount, "total_lines", len(lines))
+}
+
+// createTableForActiveRaid is the shared "build params, call sheets" step used
+// by both /create_tables and the inline "Создать таблицу" callback.
+func (h *Handler) createTableForActiveRaid(ctx context.Context, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
+	schedule := usecase.CalculateDefenseSchedule(raid.TeamsCount)
+	return h.sheets.CreateDefenseTable(ctx, sheets.DefenseTableParams{
+		RaidName:    raid.RaidName,
+		DefenseDate: defenseDate,
+		Schedule:    schedule,
+	})
 }
 
 // --- Callback Queries (inline keyboard buttons) ---
@@ -184,7 +188,7 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 	chatID := cb.Message.Message.Chat.ID
 
 	if h.sheets == nil {
-		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env")
+		_ = h.adapter.SendMessage(ctx, chatID, msgSheetsNotConfigured)
 		return
 	}
 
@@ -196,16 +200,7 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 	}
 
 	raid := weekInfo.ActiveRaid
-	schedule := usecase.CalculateDefenseSchedule(raid.TeamsCount)
-
-	// Defense is on Monday (next day after Sunday).
-	defenseDate := nextMonday(time.Now())
-
-	url, err := h.sheets.CreateDefenseTable(ctx, sheets.DefenseTableParams{
-		RaidName:    raid.RaidName,
-		DefenseDate: defenseDate,
-		Schedule:    schedule,
-	})
+	url, err := h.createTableForActiveRaid(ctx, raid, nextMonday(time.Now()))
 	if err != nil {
 		h.logger.Error("create defense table failed", "err", err)
 		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось создать таблицу. Попробуйте позже.")

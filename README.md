@@ -32,21 +32,21 @@ internal/
 │   ├── defense.go                       — расчёт таблицы защит (строки, перерывы, время)
 │   └── strategy/                        — стратегии по типам Piscine
 │       ├── strategy.go                  — интерфейс PiscineStrategy
-│       ├── base.go                      — общая логика (SupportsMessage и др.)
+│       ├── base.go                      — общая логика (SupportsMessage, Type, TemplateVars)
 │       ├── go.go, js.go, ai.go          — конкретные стратегии
 ├── delivery/telegram/
 │   ├── handler.go                       — обработчики команд и callback'ов
 │   └── router.go                        — регистрация обработчиков
 ├── infra/
 │   ├── oneedu/                          — HTTP-клиент к 01-edu GraphQL API
-│   │   ├── client.go                    — GetCurrentPiscineID, GetRaidsByPiscineID и др.
+│   │   ├── client.go                    — runQuery + GetCurrentPiscineID, GetRaidsByPiscineID, ...
 │   │   ├── types.go                     — структуры GraphQL-ответов
 │   │   └── queries/
-│   │       ├── loader.go                — embed + извлечение query по operationName
+│   │       ├── loader.go                — embed + извлечение query по operationName (per-file cache, thread-safe)
 │   │       └── raids.graphql            — 5 GraphQL-запросов
 │   ├── scheduler/scheduler.go           — CronScheduler (robfig/cron)
 │   ├── telegram/adapter.go              — обёртка над go-telegram/bot
-│   ├── templates/loader.go              — рендеринг .txt шаблонов
+│   ├── templates/loader.go              — рендеринг .txt шаблонов (single-pass regex)
 │   └── sheets/client.go                 — Google Sheets API v4
 messages/                                — шаблоны сообщений (.txt)
 ```
@@ -55,7 +55,7 @@ messages/                                — шаблоны сообщений (
 
 ### Требования
 
-- Go 1.21+
+- Go 1.22+
 - Telegram Bot Token (от [@BotFather](https://t.me/BotFather))
 - Доступ к 01-edu API (base URL + access token)
 - Google Cloud сервисный аккаунт (для Google Sheets, опционально)
@@ -66,14 +66,7 @@ messages/                                — шаблоны сообщений (
 git clone <repo-url>
 cd admin-bot
 
-# Зависимости
-go mod init admin-bot
-go get github.com/go-telegram/bot
-go get github.com/robfig/cron/v3
-go get github.com/joho/godotenv
-go get google.golang.org/api/sheets/v4
-go get google.golang.org/api/drive/v3
-go get google.golang.org/api/option
+# Подтянуть зависимости из go.mod
 go mod tidy
 ```
 
@@ -120,13 +113,17 @@ go run cmd/bot/main.go
 | `/raidgo` | Информация о рейде Piscine Go |
 | `/raidjs` | Информация о рейде Piscine JS |
 | `/raidai` | Информация о рейде Piscine AI |
+| `/create_tables` | Создать Google Sheets таблицы для всех активных рейдов |
 
 ## Как работает определение недели
 
 1. Запрос `GetCurrentPiscineId` — получает ID активного Piscine (по `startAt <= now() <= endAt`)
 2. Запрос `GetRaidsByPiscine*Id` — получает все рейды этого Piscine
-3. Ищет активный рейд (где `startAt <= now <= endAt`)
-4. По имени рейда определяет номер недели через маппинг:
+3. `findActiveRaid` — ищет активный рейд (где `startAt <= now <= endAt`)
+4. Если активного нет, `countEndedRaids` — если все рейды закончились, это финальная неделя
+5. Иначе `findNextUpcomingRaid` — следующий рейд определяет неделю
+
+По имени рейда определяется номер недели через маппинг в `domain.RaidWeekMap`:
 
 | Piscine Go | Piscine JS | Piscine AI |
 |---|---|---|
@@ -135,56 +132,56 @@ go run cmd/bot/main.go
 | quadchecker → неделя 3 | clonernews → неделя 3 | (нет) → неделя 3 = Final |
 | (нет) → неделя 4 = Final | (нет) → неделя 4 = Final | |
 
-Если все рейды закончились — финальная неделя.
-
 ## Расчёт таблицы защит
 
-Для N команд бот вычисляет:
+Для N команд (`usecase.CalculateDefenseSchedule`):
 
 - **Строк** = ceil(N / 3)
 - **Слотов** = строк × 3
-- **Перерывы**: < 5 строк — нет; 5–10 — один; > 10 — два. Максимум 5 строк подряд без перерыва.
+- **Перерывы**: < 5 строк — нет; 5–10 — один (в середине); > 10 — два (на трети). Дополнительные перерывы вставляются, если иначе будет > 5 строк подряд без перерыва.
 - **Время**: старт 11:00, шаг 30 минут, перерыв 30 минут.
 
-Пример для 35 команд: 12 строк × 3 = 36 слотов, перерывы в 13:00 и 15:30, время 11:00–17:30.
+Пример для 35 команд: 12 строк × 3 = 36 слотов, перерывы в 13:00 и 15:30, расписание 11:00–17:30.
 
 ## Тестирование
 
 ```bash
-# Все тесты
-go test ./...
+# Все тесты с детектором гонок
+go test -race ./...
 
 # С подробным выводом
-go test -v ./...
+go test -race -v ./...
 
 # Конкретный пакет
-go test -v ./internal/usecase/...
-go test -v ./internal/domain/...
-go test -v ./internal/usecase/strategy/...
-go test -v ./internal/infra/oneedu/queries/...
-go test -v ./internal/infra/templates/...
-go test -v ./internal/delivery/telegram/...
+go test -race -v ./internal/usecase/...
+go test -race -v ./internal/domain/...
+go test -race -v ./internal/usecase/strategy/...
+go test -race -v ./internal/infra/oneedu/queries/...
+go test -race -v ./internal/infra/templates/...
+go test -race -v ./internal/delivery/telegram/...
+go test -race -v ./internal/config/...
 ```
 
 Покрытие тестами:
 
-| Пакет | Что тестируется |
-|---|---|
-| `domain` | Маппинг рейд→неделя, TotalWeeks, HasHackathon, IsFinalWeek |
-| `usecase` | Расчёт таблицы защит (строки, перерывы, расписание) |
-| `usecase/strategy` | SupportsMessage для всех типов × всех недель, TemplateKey, TemplateVars |
-| `infra/oneedu/queries` | Парсинг GraphQL-файла, загрузка операций по имени |
-| `infra/templates` | Рендеринг шаблонов с подстановкой переменных |
-| `delivery/telegram` | Хелперы: nextMonday, parsePiscineFromCallback |
+| Пакет | Что тестируется | Тесты |
+|---|---|---|
+| `domain` | Маппинг рейд→неделя, TotalWeeks, HasHackathon, IsFinalWeek, GetRaidQueryName, инварианты RaidWeekMap | 8 |
+| `usecase` | Расчёт таблицы защит, DetectCurrentWeek (все ветви), BuildMessage, BuildDefenseReminder | 24 |
+| `usecase/strategy` | Полная матрица SupportsMessage (piscine × messageType × week), TemplateKey, TemplateVars | 7 |
+| `config` | Загрузка env, обязательные поля, defaults, парсинг ChatIDs, схема URL | 9 |
+| `infra/oneedu` | parseJWTExpiry (валидный, малформед, без exp), extractToken | 7 |
+| `infra/oneedu/queries` | Загрузка операций, кэш, concurrent-safe, ошибки | 5 |
+| `infra/templates` | Подстановка, missing var, repeated, empty value, no recursion, ErrTemplateNotFound | 8 |
+| `delivery/telegram` | parsePiscineFromCallback, nextMonday (все дни недели + границы месяца) | 3 |
+
+Итого: 71 тестовая функция, ~200 sub-cases.
 
 ## Стек
 
-- **Go** 1.21+
+- **Go** 1.22+
 - [go-telegram/bot](https://github.com/go-telegram/bot) — Telegram Bot API
 - [robfig/cron/v3](https://github.com/robfig/cron) — cron-планировщик
 - [google.golang.org/api](https://pkg.go.dev/google.golang.org/api) — Google Sheets & Drive API
 - [joho/godotenv](https://github.com/joho/godotenv) — загрузка .env
 - 01-edu GraphQL API — данные о рейдах и командах
-
-
-

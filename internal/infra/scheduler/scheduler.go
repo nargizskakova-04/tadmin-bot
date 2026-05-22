@@ -115,23 +115,27 @@ func (s *CronScheduler) broadcastMessage(msgType domain.MessageType, extra map[s
 			)
 			continue
 		}
+		s.sendToAll(ctx, piscine, msgType, text)
+	}
+}
 
-		for _, chatID := range s.chatIDs {
-			if err := s.sender.SendMessage(ctx, chatID, text); err != nil {
-				s.logger.Error("send failed",
-					"piscine", piscine,
-					"type", msgType,
-					"chat_id", chatID,
-					"err", err,
-				)
-			} else {
-				s.logger.Info("message sent",
-					"piscine", piscine,
-					"type", msgType,
-					"chat_id", chatID,
-				)
-			}
+// sendToAll fans a single text out to every configured chat, logging per send.
+func (s *CronScheduler) sendToAll(ctx context.Context, piscine domain.PiscineType, msgType domain.MessageType, text string) {
+	for _, chatID := range s.chatIDs {
+		if err := s.sender.SendMessage(ctx, chatID, text); err != nil {
+			s.logger.Error("send failed",
+				"piscine", piscine,
+				"type", msgType,
+				"chat_id", chatID,
+				"err", err,
+			)
+			continue
 		}
+		s.logger.Info("message sent",
+			"piscine", piscine,
+			"type", msgType,
+			"chat_id", chatID,
+		)
 	}
 }
 
@@ -153,14 +157,14 @@ func (s *CronScheduler) broadcastDefenseReminder() {
 			if s.DefenseCallback != nil {
 				// Let the callback handle sending (with inline keyboard).
 				s.DefenseCallback(ctx, chatID, piscine, text, schedule)
-			} else {
-				// Fallback: send as plain text.
-				if err := s.sender.SendMessage(ctx, chatID, text); err != nil {
-					s.logger.Error("send defense reminder failed",
-						"chat_id", chatID,
-						"err", err,
-					)
-				}
+				continue
+			}
+			// Fallback: send as plain text.
+			if err := s.sender.SendMessage(ctx, chatID, text); err != nil {
+				s.logger.Error("send defense reminder failed",
+					"chat_id", chatID,
+					"err", err,
+				)
 			}
 		}
 	}
