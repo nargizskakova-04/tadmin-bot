@@ -18,21 +18,49 @@ import (
 
 // Handler processes Telegram commands and callback queries.
 type Handler struct {
-	raidUC  *usecase.RaidUseCase
-	adapter *tgAdapter.Adapter
-	sheets  *sheets.Client // nil if Google Sheets is not configured
-	logger  *slog.Logger
+	raidUC    *usecase.RaidUseCase
+	adapter   *tgAdapter.Adapter
+	sheets    *sheets.Client // nil if Google Sheets is not configured
+	sheetIDs  map[domain.PiscineType]map[int]string
+	sheetURLs map[domain.PiscineType]map[int]string
+	logger    *slog.Logger
 }
 
-const msgSheetsNotConfigured = "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env"
+const (
+	msgSheetsNotConfigured = "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env"
+	msgSheetNotConfigured  = "⚠️ Таблица для этой недели не настроена. Добавьте SHEET_*_WEEK* в .env"
+)
 
-func NewHandler(raidUC *usecase.RaidUseCase, adapter *tgAdapter.Adapter, sheetsClient *sheets.Client, logger *slog.Logger) *Handler {
+// NewHandler wires the dependencies needed for command and callback handling.
+//
+// sheetIDs / sheetURLs are the pre-configured Google Sheets tables, keyed by
+// piscine and week. Either may be empty — in that case table-related features
+// gracefully degrade.
+func NewHandler(
+	raidUC *usecase.RaidUseCase,
+	adapter *tgAdapter.Adapter,
+	sheetsClient *sheets.Client,
+	sheetIDs map[domain.PiscineType]map[int]string,
+	sheetURLs map[domain.PiscineType]map[int]string,
+	logger *slog.Logger,
+) *Handler {
 	return &Handler{
-		raidUC:  raidUC,
-		adapter: adapter,
-		sheets:  sheetsClient,
-		logger:  logger,
+		raidUC:    raidUC,
+		adapter:   adapter,
+		sheets:    sheetsClient,
+		sheetIDs:  sheetIDs,
+		sheetURLs: sheetURLs,
+		logger:    logger,
 	}
+}
+
+// lookupSheetID returns the configured spreadsheet ID for (piscine, week)
+// or "" if none is set.
+func (h *Handler) lookupSheetID(piscine domain.PiscineType, week int) string {
+	if m, ok := h.sheetIDs[piscine]; ok {
+		return m[week]
+	}
+	return ""
 }
 
 // --- Commands ---
@@ -46,7 +74,7 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidjs — информация о рейде Piscine JS\n" +
 		"/raidai — информация о рейде Piscine AI\n" +
 		"/week — текущая неделя для всех Piscine\n" +
-		"/create_tables — создать Google Sheets таблицы защит для всех активных рейдов"
+		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов"
 
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send help failed", "err", err)
@@ -96,7 +124,7 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 
 // CreateTables handles the /create_tables command.
 // It iterates over all known Piscines, finds the active raid for each one
-// (if any), and creates a Google Sheets defense table per raid.
+// (if any), looks up the pre-configured spreadsheet, and updates its contents.
 // The user receives a single message with a per-raid result line.
 func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID := update.Message.Chat.ID
@@ -106,17 +134,17 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	// Defense is on Monday — the same date for all tables created in this run.
+	// Defense is on Monday — the same date for all tables updated in this run.
 	defenseDate := nextMonday(time.Now())
 
 	var lines []string
-	createdCount := 0
+	updatedCount := 0
 
 	for _, piscine := range domain.AllPiscines() {
 		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
 		if err != nil {
 			h.logger.Warn("detect week failed", "piscine", piscine, "err", err)
-			lines = append(lines, fmt.Sprintf("❌ Ошибка при создании таблицы (%s): %v", piscine, err))
+			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s): %v", piscine, err))
 			continue
 		}
 
@@ -127,18 +155,28 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 		}
 
 		raid := weekInfo.ActiveRaid
-		url, err := h.createTableForActiveRaid(ctx, raid, defenseDate)
-		if err != nil {
-			h.logger.Error("create defense table failed", "piscine", piscine, "raid", raid.RaidName, "err", err)
-			lines = append(lines, fmt.Sprintf("❌ Ошибка при создании таблицы (%s): %v", piscine, err))
+
+		spreadsheetID := h.lookupSheetID(piscine, weekInfo.WeekNumber)
+		if spreadsheetID == "" {
+			h.logger.Warn("no sheet configured for week",
+				"piscine", piscine, "week", weekInfo.WeekNumber)
+			lines = append(lines, fmt.Sprintf("⚠️ %s — таблица для недели %d не настроена", piscine, weekInfo.WeekNumber))
 			continue
 		}
 
-		createdCount++
-		lines = append(lines, fmt.Sprintf("✅ Таблица создана (%s — %s): %s", piscine, raid.RaidName, url))
+		url, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, defenseDate)
+		if err != nil {
+			h.logger.Error("update defense table failed",
+				"piscine", piscine, "raid", raid.RaidName, "err", err)
+			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s): %v", piscine, err))
+			continue
+		}
+
+		updatedCount++
+		lines = append(lines, fmt.Sprintf("✅ Таблица обновлена (%s — %s): %s", piscine, raid.RaidName, url))
 	}
 
-	resp := "ℹ️ На этой неделе нет активных рейдов — создавать нечего."
+	resp := "ℹ️ На этой неделе нет активных рейдов — обновлять нечего."
 	if len(lines) > 0 {
 		resp = strings.Join(lines, "\n")
 	}
@@ -147,14 +185,14 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 		h.logger.Error("send create_tables result failed", "err", err)
 	}
 
-	h.logger.Info("create_tables finished", "created", createdCount, "total_lines", len(lines))
+	h.logger.Info("create_tables finished", "updated", updatedCount, "total_lines", len(lines))
 }
 
-// createTableForActiveRaid is the shared "build params, call sheets" step used
+// updateTableForActiveRaid is the shared "build params, call sheets" step used
 // by both /create_tables and the inline "Создать таблицу" callback.
-func (h *Handler) createTableForActiveRaid(ctx context.Context, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
+func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
 	schedule := usecase.CalculateDefenseSchedule(raid.TeamsCount)
-	return h.sheets.CreateDefenseTable(ctx, sheets.DefenseTableParams{
+	return h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
 		RaidName:    raid.RaidName,
 		DefenseDate: defenseDate,
 		Schedule:    schedule,
@@ -182,7 +220,7 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 
 	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: cb.ID,
-		Text:            "Создаю таблицу…",
+		Text:            "Обновляю таблицу…",
 	})
 
 	chatID := cb.Message.Message.Chat.ID
@@ -199,15 +237,23 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 
-	raid := weekInfo.ActiveRaid
-	url, err := h.createTableForActiveRaid(ctx, raid, nextMonday(time.Now()))
-	if err != nil {
-		h.logger.Error("create defense table failed", "err", err)
-		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось создать таблицу. Попробуйте позже.")
+	spreadsheetID := h.lookupSheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
+	if spreadsheetID == "" {
+		h.logger.Warn("no sheet configured for week",
+			"piscine", piscine, "week", weekInfo.WeekNumber)
+		_ = h.adapter.SendMessage(ctx, chatID, msgSheetNotConfigured)
 		return
 	}
 
-	text := fmt.Sprintf("✅ Таблица защит создана!\n📊 %s\n🔗 %s", raid.RaidName, url)
+	raid := weekInfo.ActiveRaid
+	url, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, nextMonday(time.Now()))
+	if err != nil {
+		h.logger.Error("update defense table failed", "err", err)
+		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось обновить таблицу. Попробуйте позже.")
+		return
+	}
+
+	text := fmt.Sprintf("✅ Таблица защит обновлена!\n📊 %s\n🔗 %s", raid.RaidName, url)
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send table url failed", "err", err)
 	}
@@ -240,7 +286,7 @@ func (h *Handler) SendDefenseReminderWithKeyboard(ctx context.Context, chatID in
 	keyboard := &models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
-				{Text: "📊 Создать таблицу", CallbackData: "defense_create:" + string(piscine)},
+				{Text: "📊 Обновить таблицу", CallbackData: "defense_create:" + string(piscine)},
 				{Text: "✏️ Изменить параметры", CallbackData: "defense_edit:" + string(piscine)},
 			},
 		},

@@ -36,7 +36,9 @@ func main() {
 	eduClient := oneedu.NewClient(cfg.OneEduBaseURL, cfg.OneEduAccessToken, logger)
 	tmplLoader := templates.NewFileLoader(cfg.TemplatesPath)
 
-	// Google Sheets (optional)
+	// Google Sheets (optional). When unavailable, the bot still runs — the
+	// "update table" button is disabled, but SHEET_URLs are still injected
+	// into the Sunday student message from the env config.
 	var sheetsClient *sheets.Client
 	if cfg.GoogleCredentialsFile != "" {
 		sheetsClient, err = sheets.NewClient(cfg.GoogleCredentialsFile, logger)
@@ -46,7 +48,7 @@ func main() {
 			logger.Info("google sheets client initialized")
 		}
 	} else {
-		logger.Warn("GOOGLE_CREDENTIALS_FILE not set — sheet creation will be unavailable")
+		logger.Warn("GOOGLE_CREDENTIALS_FILE not set — sheet updates will be unavailable")
 	}
 
 	// Strategies
@@ -66,11 +68,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	handler := delivery.NewHandler(raidUC, tgAdapter, sheetsClient, logger)
+	handler := delivery.NewHandler(raidUC, tgAdapter, sheetsClient, cfg.SheetIDs, cfg.SheetURLs, logger)
 	delivery.RegisterHandlers(tgAdapter.Bot(), handler)
 
-	// Scheduler
-	sched := scheduler.NewCronScheduler(raidUC, tgAdapter, cfg.ChatIDs, cfg.Timezone, logger)
+	// Scheduler — knows about sheet URLs so the Sunday student message can
+	// embed a stable, pre-configured link.
+	sched := scheduler.NewCronScheduler(raidUC, tgAdapter, cfg.ChatIDs, cfg.Timezone, cfg.SheetURLs, logger)
 
 	// Wire the defense reminder callback to send inline keyboard buttons.
 	sched.DefenseCallback = handler.SendDefenseReminderWithKeyboard

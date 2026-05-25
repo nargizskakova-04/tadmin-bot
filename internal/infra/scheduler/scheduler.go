@@ -13,11 +13,12 @@ import (
 
 // CronScheduler sends announcements at specific days/times using cron expressions.
 type CronScheduler struct {
-	cron    *cron.Cron
-	raidUC  *usecase.RaidUseCase
-	sender  domain.BotSender
-	chatIDs []int64
-	logger  *slog.Logger
+	cron      *cron.Cron
+	raidUC    *usecase.RaidUseCase
+	sender    domain.BotSender
+	chatIDs   []int64
+	sheetURLs map[domain.PiscineType]map[int]string
+	logger    *slog.Logger
 
 	// DefenseCallback is called when a defense reminder is sent.
 	// It receives the chat ID, piscine type, rendered text, and schedule info
@@ -27,11 +28,17 @@ type CronScheduler struct {
 
 // NewCronScheduler creates a scheduler with predefined cron jobs.
 // timezone should be an IANA timezone name, e.g. "Asia/Almaty".
+//
+// sheetURLs maps each (piscine, week) to a pre-configured Google Sheets URL
+// that will be embedded in the Sunday student message. Missing entries simply
+// produce an empty SHEET_URL substitution in the template — the message is
+// still sent.
 func NewCronScheduler(
 	raidUC *usecase.RaidUseCase,
 	sender domain.BotSender,
 	chatIDs []int64,
 	timezone string,
+	sheetURLs map[domain.PiscineType]map[int]string,
 	logger *slog.Logger,
 ) *CronScheduler {
 	loc, err := time.LoadLocation(timezone)
@@ -41,11 +48,12 @@ func NewCronScheduler(
 	}
 
 	s := &CronScheduler{
-		cron:    cron.New(cron.WithLocation(loc)),
-		raidUC:  raidUC,
-		sender:  sender,
-		chatIDs: chatIDs,
-		logger:  logger,
+		cron:      cron.New(cron.WithLocation(loc)),
+		raidUC:    raidUC,
+		sender:    sender,
+		chatIDs:   chatIDs,
+		sheetURLs: sheetURLs,
+		logger:    logger,
 	}
 	s.registerJobs()
 	return s
@@ -72,10 +80,11 @@ func (s *CronScheduler) registerJobs() {
 		s.broadcastMessage(domain.MsgHackathon, nil)
 	})
 
-	// Sunday 15:00 — Defense reminder (admin) + Student message
+	// Sunday 15:00 — Defense reminder (admin) + Student message (with SHEET_URL).
+	// Both go out from broadcastDefenseReminder so the per-piscine SHEET_URL
+	// can be threaded into the student template.
 	s.mustAdd("0 15 * * 0", func() {
 		s.broadcastDefenseReminder()
-		s.broadcastMessage(domain.MsgStudentMessage, nil)
 	})
 }
 
@@ -139,7 +148,19 @@ func (s *CronScheduler) sendToAll(ctx context.Context, piscine domain.PiscineTyp
 	}
 }
 
-// broadcastDefenseReminder sends defense table reminders with schedule info.
+// sheetURLFor returns the configured spreadsheet URL for (piscine, week) or ""
+// if none is set. An empty URL is intentional — the student template tolerates
+// an empty substitution and the message still goes out.
+func (s *CronScheduler) sheetURLFor(piscine domain.PiscineType, week int) string {
+	if m, ok := s.sheetURLs[piscine]; ok {
+		return m[week]
+	}
+	return ""
+}
+
+// broadcastDefenseReminder sends defense table reminders to admins (with the
+// "Update table" inline keyboard) and the matching student message (with the
+// pre-configured SHEET_URL) to the same chats.
 func (s *CronScheduler) broadcastDefenseReminder() {
 	ctx := context.Background()
 
@@ -153,18 +174,47 @@ func (s *CronScheduler) broadcastDefenseReminder() {
 			continue
 		}
 
-		for _, chatID := range s.chatIDs {
-			if s.DefenseCallback != nil {
-				// Let the callback handle sending (with inline keyboard).
-				s.DefenseCallback(ctx, chatID, piscine, text, schedule)
-				continue
+		// Build the matching student message with SHEET_URL from env (may be empty).
+		// We need the week number to look up the URL — DetectCurrentWeek is cheap
+		// to call once more than to plumb through BuildDefenseReminder's signature.
+		sheetURL := ""
+		if weekInfo, err := s.raidUC.DetectCurrentWeek(ctx, piscine); err == nil && weekInfo != nil {
+			sheetURL = s.sheetURLFor(piscine, weekInfo.WeekNumber)
+			if sheetURL == "" {
+				s.logger.Warn("no sheet URL configured for week",
+					"piscine", piscine, "week", weekInfo.WeekNumber)
 			}
-			// Fallback: send as plain text.
-			if err := s.sender.SendMessage(ctx, chatID, text); err != nil {
+		}
+
+		studentText, studentErr := s.raidUC.BuildMessage(ctx, piscine, domain.MsgStudentMessage,
+			map[string]string{"SHEET_URL": sheetURL})
+		if studentErr != nil {
+			s.logger.Debug("skip student message",
+				"piscine", piscine,
+				"reason", studentErr,
+			)
+		}
+
+		for _, chatID := range s.chatIDs {
+			// Admin reminder with inline keyboard (falls back to plain text).
+			if s.DefenseCallback != nil {
+				s.DefenseCallback(ctx, chatID, piscine, text, schedule)
+			} else if err := s.sender.SendMessage(ctx, chatID, text); err != nil {
 				s.logger.Error("send defense reminder failed",
 					"chat_id", chatID,
 					"err", err,
 				)
+			}
+
+			// Student message into the same chats.
+			if studentErr == nil {
+				if err := s.sender.SendMessage(ctx, chatID, studentText); err != nil {
+					s.logger.Error("send student message failed",
+						"piscine", piscine,
+						"chat_id", chatID,
+						"err", err,
+					)
+				}
 			}
 		}
 	}
