@@ -1,0 +1,18 @@
+# Version control
+.git
+.gitignore
+
+# Secrets / local environment — config is injected via Railway env vars.
+*.env
+.env*
+credentials.json
+
+# Local build / test artifacts
+tmp/
+*.test
+*.out
+*.log
+bot
+
+# Docs (not needed inside the image)
+README.md
