@@ -58,20 +58,13 @@ func NewClient(baseURL, accessToken string, logger *slog.Logger) *Client {
 // embeds the full request URL — which historically carried the access token in
 // a query string. We also redact any JWT currently held.
 func (c *Client) scrub(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || c.accessToken == "" {
+		return err
 	}
-	msg := err.Error()
-	if c.accessToken != "" {
-		msg = strings.ReplaceAll(msg, c.accessToken, "[REDACTED_ACCESS_TOKEN]")
+	if s := err.Error(); strings.Contains(s, c.accessToken) {
+		return errors.New(strings.ReplaceAll(s, c.accessToken, "[REDACTED_ACCESS_TOKEN]"))
 	}
-	c.mu.RLock()
-	jwt := c.jwtToken
-	c.mu.RUnlock()
-	if jwt != "" {
-		msg = strings.ReplaceAll(msg, jwt, "[REDACTED_JWT]")
-	}
-	return errors.New(msg)
+	return err
 }
 
 // readCapped reads at most maxResponseBytes from r, scrubbing nothing (callers
