@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -25,6 +26,7 @@ func main() {
 	_ = godotenv.Load()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+
 	if creds := os.Getenv("GOOGLE_CREDENTIALS_JSON"); creds != "" {
 		if err := os.WriteFile("credentials.json", []byte(creds), 0600); err != nil {
 			logger.Error("failed to write credentials.json", "err", err)
@@ -37,13 +39,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if len(cfg.AdminChatIDs) == 0 {
+		logger.Warn("no ADMIN_CHAT_IDS/CHAT_IDS configured — bot will reject ALL commands (fail-closed)")
+	}
+
+	// Resolve the configured timezone once so date arithmetic (nextMonday) is
+	// consistent with the cron schedule rather than the container's UTC clock.
+	loc, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		logger.Error("invalid timezone, using UTC", "timezone", cfg.Timezone, "err", err)
+		loc = time.UTC
+	}
+
 	// Infrastructure
 	eduClient := oneedu.NewClient(cfg.OneEduBaseURL, cfg.OneEduAccessToken, logger)
 	tmplLoader := templates.NewFileLoader(cfg.TemplatesPath)
 
-	// Google Sheets (optional). When unavailable, the bot still runs — the
-	// "update table" button is disabled, but SHEET_URLs are still injected
-	// into the Sunday student message from the env config.
 	var sheetsClient *sheets.Client
 	if cfg.GoogleCredentialsFile != "" {
 		sheetsClient, err = sheets.NewClient(cfg.GoogleCredentialsFile, logger)
@@ -56,36 +67,36 @@ func main() {
 		logger.Warn("GOOGLE_CREDENTIALS_FILE not set — sheet updates will be unavailable")
 	}
 
-	// Strategies
 	strategies := []strategy.PiscineStrategy{
 		strategy.NewGoStrategy(),
 		strategy.NewJSStrategy(),
 		strategy.NewAIStrategy(),
 	}
 
-	// Use case
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
 
-	// Telegram
 	tgAdapter, err := telegram.NewAdapter(cfg.TelegramToken, logger)
 	if err != nil {
 		logger.Error("failed to create telegram adapter", "err", err)
 		os.Exit(1)
 	}
 
-	handler := delivery.NewHandler(raidUC, tgAdapter, sheetsClient, cfg.SheetIDs, cfg.SheetURLs, logger)
+	handler := delivery.NewHandler(
+		raidUC,
+		tgAdapter,
+		sheetsClient,
+		cfg.SheetIDs,
+		cfg.SheetURLs,
+		cfg.AdminChatIDs,
+		loc,
+		logger,
+	)
 	delivery.RegisterHandlers(tgAdapter.Bot(), handler)
 
-	// Scheduler — knows about sheet URLs so the Sunday student message can
-	// embed a stable, pre-configured link.
 	sched := scheduler.NewCronScheduler(raidUC, tgAdapter, cfg.ChatIDs, cfg.Timezone, cfg.SheetURLs, logger)
-
-	// Wire the defense reminder callback to send inline keyboard buttons.
 	sched.DefenseCallback = handler.SendDefenseReminderWithKeyboard
-
 	sched.Start()
 
-	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

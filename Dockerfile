@@ -2,73 +2,50 @@
 
 ###############################################################################
 # admin-bot — Telegram bot for managing Piscine announcements & defense tables
+# Deployment target: Railway.
 #
-# Deployment target: Railway (auto-detects this Dockerfile in the repo root,
-# no railway.toml required).
-#
-# ---------------------------------------------------------------------------
-# Environment variables (inject via Railway → Variables, NOT via a .env file)
-# ---------------------------------------------------------------------------
-# Required:
-#   TELEGRAM_TOKEN          Telegram bot token (from @BotFather)
-#   ONEEDU_BASE_URL         01-edu platform URL (e.g. learn.tomorrow-school.com)
-#   PLATFORM_ACCESS_TOKEN   Access token for the 01-edu API
-#   CHAT_IDS                Comma-separated chat IDs (e.g. -100123,-100987)
-#
-# Optional:
-#   TIMEZONE                IANA tz for cron (default: Asia/Almaty)
-#   TEMPLATES_PATH          Path to message templates (default: messages)
-#   GOOGLE_CREDENTIALS_FILE Path to the Google service-account JSON key.
-#                           Do NOT bake this into the image — mount it via a
-#                           Railway volume or inject the file at runtime.
-#   SHEET_GO_WEEK1 .. WEEK3 Pre-configured Google Sheets URLs (Piscine Go)
-#   SHEET_JS_WEEK1 .. WEEK3 Pre-configured Google Sheets URLs (Piscine JS)
-#   SHEET_AI_WEEK1 .. WEEK2 Pre-configured Google Sheets URLs (Piscine AI)
+# Environment variables (inject via Railway → Variables, NOT a .env file):
+#   Required: TELEGRAM_TOKEN, ONEEDU_BASE_URL (https://), PLATFORM_ACCESS_TOKEN, CHAT_IDS
+#   Authorization: ADMIN_CHAT_IDS (optional; defaults to CHAT_IDS) — only these
+#                  chats may issue commands / press inline buttons.
+#   Optional: TIMEZONE, TEMPLATES_PATH, GOOGLE_CREDENTIALS_FILE,
+#             GOOGLE_CREDENTIALS_JSON, SHEET_*_WEEK*
+#             ONEEDU_ALLOW_INSECURE=1 (local dev only; permits http:// upstream)
 ###############################################################################
-
 
 ###############################################################################
 # Stage 1 — builder
 ###############################################################################
-FROM golang:1.22-alpine AS builder
+# Pin to a specific patch (and ideally a @sha256 digest) for reproducible builds.
+FROM golang:1.22.5-alpine AS builder
 
 WORKDIR /src
 
-# Download dependencies first so this layer is cached unless go.mod/go.sum change.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source.
 COPY . .
 
-# Build a fully static binary (CGO_ENABLED=0) so it runs on bare alpine
-# without glibc. -trimpath strips local paths; -s -w drops the symbol table
-# and DWARF debug info to shrink the binary.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o bot ./cmd/bot/main.go
-
 
 ###############################################################################
 # Stage 2 — final runtime image
 ###############################################################################
-FROM alpine:latest
+# Pin the runtime base image to a concrete version rather than the moving
+# `latest` tag. Replace with a @sha256 digest in CI for full supply-chain pinning.
+FROM alpine:3.20
 
-# ca-certificates  — TLS verification for the 01-edu API and Google Sheets API.
-# tzdata           — IANA zoneinfo so time.LoadLocation("Asia/Almaty") resolves.
 RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 
-# Run as an unprivileged user rather than root.
 RUN adduser -D -u 10001 appuser
 
-# Compiled binary from the builder stage.
 COPY --from=builder /src/bot ./bot
-
-# Message templates, read at runtime via TEMPLATES_PATH (default "messages").
 COPY --from=builder /src/messages ./messages
 
 USER appuser
 
-# No EXPOSE: this is a long-polling Telegram bot, it opens no inbound port.
+# No EXPOSE: long-polling Telegram bot, no inbound port.
 
 CMD ["./bot"]

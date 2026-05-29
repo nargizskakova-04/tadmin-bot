@@ -18,12 +18,14 @@ import (
 
 // Handler processes Telegram commands and callback queries.
 type Handler struct {
-	raidUC    *usecase.RaidUseCase
-	adapter   *tgAdapter.Adapter
-	sheets    *sheets.Client // nil if Google Sheets is not configured
-	sheetIDs  map[domain.PiscineType]map[int]string
-	sheetURLs map[domain.PiscineType]map[int]string
-	logger    *slog.Logger
+	raidUC     *usecase.RaidUseCase
+	adapter    *tgAdapter.Adapter
+	sheets     *sheets.Client // nil if Google Sheets is not configured
+	sheetIDs   map[domain.PiscineType]map[int]string
+	sheetURLs  map[domain.PiscineType]map[int]string
+	authorized map[int64]bool // allowlist of chat IDs permitted to issue commands
+	loc        *time.Location // configured timezone, used for date arithmetic
+	logger     *slog.Logger
 }
 
 const (
@@ -33,29 +35,46 @@ const (
 
 // NewHandler wires the dependencies needed for command and callback handling.
 //
-// sheetIDs / sheetURLs are the pre-configured Google Sheets tables, keyed by
-// piscine and week. Either may be empty — in that case table-related features
-// gracefully degrade.
+// authorizedChatIDs is the allowlist of chats permitted to issue commands and
+// press inline buttons. loc is the configured timezone used for the defense
+// date (nextMonday) so the date does not drift between the container clock
+// (UTC) and the cron timezone.
 func NewHandler(
 	raidUC *usecase.RaidUseCase,
 	adapter *tgAdapter.Adapter,
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
 	sheetURLs map[domain.PiscineType]map[int]string,
+	authorizedChatIDs []int64,
+	loc *time.Location,
 	logger *slog.Logger,
 ) *Handler {
+	allow := make(map[int64]bool, len(authorizedChatIDs))
+	for _, id := range authorizedChatIDs {
+		allow[id] = true
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
 	return &Handler{
-		raidUC:    raidUC,
-		adapter:   adapter,
-		sheets:    sheetsClient,
-		sheetIDs:  sheetIDs,
-		sheetURLs: sheetURLs,
-		logger:    logger,
+		raidUC:     raidUC,
+		adapter:    adapter,
+		sheets:     sheetsClient,
+		sheetIDs:   sheetIDs,
+		sheetURLs:  sheetURLs,
+		authorized: allow,
+		loc:        loc,
+		logger:     logger,
 	}
 }
 
-// lookupSheetID returns the configured spreadsheet ID for (piscine, week)
-// or "" if none is set.
+// isAuthorized reports whether the given chat may issue commands. If the
+// allowlist is empty the bot is "locked" (deny-all) rather than open — this is
+// fail-closed by design.
+func (h *Handler) isAuthorized(chatID int64) bool {
+	return h.authorized[chatID]
+}
+
 func (h *Handler) lookupSheetID(piscine domain.PiscineType, week int) string {
 	if m, ok := h.sheetIDs[piscine]; ok {
 		return m[week]
@@ -63,9 +82,15 @@ func (h *Handler) lookupSheetID(piscine domain.PiscineType, week int) string {
 	return ""
 }
 
+// now returns the current time in the configured location.
+func (h *Handler) now() time.Time { return time.Now().In(h.loc) }
+
 // --- Commands ---
 
 func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
 	chatID := update.Message.Chat.ID
 
 	text := "📋 <b>Команды:</b>\n\n" +
@@ -94,13 +119,16 @@ func (h *Handler) HandleRaidAI(ctx context.Context, b *bot.Bot, update *models.U
 }
 
 func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
 	chatID := update.Message.Chat.ID
 
 	var sb strings.Builder
 	for _, p := range domain.AllPiscines() {
 		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, p)
 		if err != nil {
-			fmt.Fprintf(&sb, "❌ %s: %v\n", p, err)
+			fmt.Fprintf(&sb, "❌ %s: %v\n", escapeHTML(string(p)), escapeHTML(err.Error()))
 			continue
 		}
 
@@ -114,7 +142,8 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 			weekLabel += " (Final Exam)"
 		}
 
-		fmt.Fprintf(&sb, "📌 <b>%s</b>: %s | Рейд: %s\n", p, weekLabel, raidName)
+		fmt.Fprintf(&sb, "📌 <b>%s</b>: %s | Рейд: %s\n",
+			escapeHTML(string(p)), weekLabel, escapeHTML(raidName))
 	}
 
 	if err := h.adapter.SendMessage(ctx, chatID, sb.String()); err != nil {
@@ -123,10 +152,13 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 }
 
 // CreateTables handles the /create_tables command.
-// It iterates over all known Piscines, finds the active raid for each one
-// (if any), looks up the pre-configured spreadsheet, and updates its contents.
-// The user receives a single message with a per-raid result line.
 func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		if update.Message != nil {
+			h.logger.Warn("unauthorized /create_tables", "chat_id", update.Message.Chat.ID)
+		}
+		return
+	}
 	chatID := update.Message.Chat.ID
 
 	if h.sheets == nil {
@@ -134,8 +166,9 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	// Defense is on Monday — the same date for all tables updated in this run.
-	defenseDate := nextMonday(time.Now())
+	// Defense is on Monday — computed in the configured timezone so the date
+	// matches what admins see locally regardless of the container clock.
+	defenseDate := nextMonday(h.now())
 
 	var lines []string
 	updatedCount := 0
@@ -144,11 +177,10 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
 		if err != nil {
 			h.logger.Warn("detect week failed", "piscine", piscine, "err", err)
-			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s): %v", piscine, err))
+			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s)", piscine))
 			continue
 		}
 
-		// Skip piscines without an active raid (e.g. final exam week or between raids).
 		if weekInfo.ActiveRaid == nil {
 			h.logger.Info("skip: no active raid", "piscine", piscine)
 			continue
@@ -158,22 +190,21 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 
 		spreadsheetID := h.lookupSheetID(piscine, weekInfo.WeekNumber)
 		if spreadsheetID == "" {
-			h.logger.Warn("no sheet configured for week",
-				"piscine", piscine, "week", weekInfo.WeekNumber)
+			h.logger.Warn("no sheet configured for week", "piscine", piscine, "week", weekInfo.WeekNumber)
 			lines = append(lines, fmt.Sprintf("⚠️ %s — таблица для недели %d не настроена", piscine, weekInfo.WeekNumber))
 			continue
 		}
 
 		url, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, defenseDate)
 		if err != nil {
-			h.logger.Error("update defense table failed",
-				"piscine", piscine, "raid", raid.RaidName, "err", err)
-			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s): %v", piscine, err))
+			h.logger.Error("update defense table failed", "piscine", piscine, "raid", raid.RaidName, "err", err)
+			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s)", piscine))
 			continue
 		}
 
 		updatedCount++
-		lines = append(lines, fmt.Sprintf("✅ Таблица обновлена (%s — %s): %s", piscine, raid.RaidName, url))
+		lines = append(lines, fmt.Sprintf("✅ Таблица обновлена (%s — %s): %s",
+			escapeHTML(string(piscine)), escapeHTML(raid.RaidName), url))
 	}
 
 	resp := "ℹ️ На этой неделе нет активных рейдов — обновлять нечего."
@@ -188,8 +219,6 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 	h.logger.Info("create_tables finished", "updated", updatedCount, "total_lines", len(lines))
 }
 
-// updateTableForActiveRaid is the shared "build params, call sheets" step used
-// by both /create_tables and the inline "Создать таблицу" callback.
 func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
 	schedule := usecase.CalculateDefenseSchedule(raid.TeamsCount)
 	return h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
@@ -201,36 +230,61 @@ func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID st
 
 // --- Callback Queries (inline keyboard buttons) ---
 
-// HandleCallbackCreateTable handles the "Создать таблицу" button press.
-// Callback data format: "defense_create:<PiscineType>"
+// callbackChatID safely extracts the originating chat ID from a callback query.
+// Telegram callbacks can carry a nil or inaccessible Message; callers must
+// check ok before using the result.
+func callbackChatID(cb *models.CallbackQuery) (int64, bool) {
+	// cb.Message is a value of type models.MaybeInaccessibleMessage (not a
+	// pointer), so it can't be nil-compared. Its inner .Message is *models.Message
+	// and is nil when the callback's source message is inaccessible (too old, or
+	// an inline-message origin) — that's the case we must guard against.
+	if cb == nil || cb.Message.Message == nil {
+		return 0, false
+	}
+	return cb.Message.Message.Chat.ID, true
+}
+
+// answer is a best-effort callback acknowledgement that logs (rather than
+// ignores) failures.
+func (h *Handler) answer(ctx context.Context, b *bot.Bot, id, text string) {
+	if _, err := b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: id,
+		Text:            text,
+	}); err != nil {
+		h.logger.Warn("answer callback failed", "err", err)
+	}
+}
+
+// HandleCallbackCreateTable handles the "Обновить таблицу" button press.
 func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, update *models.Update) {
 	cb := update.CallbackQuery
-	if cb == nil {
+	chatID, ok := callbackChatID(cb)
+	if !ok {
+		if cb != nil {
+			h.answer(ctx, b, cb.ID, "Ошибка: сообщение недоступно")
+		}
+		return
+	}
+
+	if !h.isAuthorized(chatID) {
+		h.logger.Warn("unauthorized callback", "data", "defense_create", "chat_id", chatID)
+		h.answer(ctx, b, cb.ID, "Недостаточно прав")
 		return
 	}
 
 	piscine := parsePiscineFromCallback(cb.Data, "defense_create:")
 	if piscine == "" {
-		b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-			CallbackQueryID: cb.ID,
-			Text:            "Ошибка: неизвестный тип Piscine",
-		})
+		h.answer(ctx, b, cb.ID, "Ошибка: неизвестный тип Piscine")
 		return
 	}
 
-	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-		CallbackQueryID: cb.ID,
-		Text:            "Обновляю таблицу…",
-	})
-
-	chatID := cb.Message.Message.Chat.ID
+	h.answer(ctx, b, cb.ID, "Обновляю таблицу…")
 
 	if h.sheets == nil {
 		_ = h.adapter.SendMessage(ctx, chatID, msgSheetsNotConfigured)
 		return
 	}
 
-	// Detect current week and get raid info.
 	weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, domain.PiscineType(piscine))
 	if err != nil || weekInfo.ActiveRaid == nil {
 		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось получить данные о рейде.")
@@ -239,21 +293,20 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 
 	spreadsheetID := h.lookupSheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
 	if spreadsheetID == "" {
-		h.logger.Warn("no sheet configured for week",
-			"piscine", piscine, "week", weekInfo.WeekNumber)
+		h.logger.Warn("no sheet configured for week", "piscine", piscine, "week", weekInfo.WeekNumber)
 		_ = h.adapter.SendMessage(ctx, chatID, msgSheetNotConfigured)
 		return
 	}
 
 	raid := weekInfo.ActiveRaid
-	url, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, nextMonday(time.Now()))
+	url, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, nextMonday(h.now()))
 	if err != nil {
 		h.logger.Error("update defense table failed", "err", err)
 		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось обновить таблицу. Попробуйте позже.")
 		return
 	}
 
-	text := fmt.Sprintf("✅ Таблица защит обновлена!\n📊 %s\n🔗 %s", raid.RaidName, url)
+	text := fmt.Sprintf("✅ Таблица защит обновлена!\n📊 %s\n🔗 %s", escapeHTML(raid.RaidName), url)
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send table url failed", "err", err)
 	}
@@ -262,18 +315,22 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 // HandleCallbackEditParams handles the "Изменить параметры" button press.
 func (h *Handler) HandleCallbackEditParams(ctx context.Context, b *bot.Bot, update *models.Update) {
 	cb := update.CallbackQuery
-	if cb == nil {
+	chatID, ok := callbackChatID(cb)
+	if !ok {
+		if cb != nil {
+			h.answer(ctx, b, cb.ID, "Ошибка: сообщение недоступно")
+		}
 		return
 	}
 
-	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-		CallbackQueryID: cb.ID,
-		Text:            "Изменение параметров",
-	})
+	if !h.isAuthorized(chatID) {
+		h.logger.Warn("unauthorized callback", "data", "defense_edit", "chat_id", chatID)
+		h.answer(ctx, b, cb.ID, "Недостаточно прав")
+		return
+	}
 
-	chatID := cb.Message.Message.Chat.ID
+	h.answer(ctx, b, cb.ID, "Изменение параметров")
 
-	// TODO: implement parameter editing flow (e.g. change start time, break count).
 	if err := h.adapter.SendMessage(ctx, chatID, "🚧 Изменение параметров — в разработке"); err != nil {
 		h.logger.Error("send edit params response failed", "err", err)
 	}
@@ -300,6 +357,9 @@ func (h *Handler) SendDefenseReminderWithKeyboard(ctx context.Context, chatID in
 // --- Helpers ---
 
 func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, piscine domain.PiscineType) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
 	chatID := update.Message.Chat.ID
 
 	weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
@@ -310,7 +370,8 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 	}
 
 	if weekInfo.ActiveRaid == nil {
-		text := fmt.Sprintf("📌 <b>%s</b> — Неделя %d (Final Exam)\nАктивных рейдов нет.", piscine, weekInfo.WeekNumber)
+		text := fmt.Sprintf("📌 <b>%s</b> — Неделя %d (Final Exam)\nАктивных рейдов нет.",
+			escapeHTML(string(piscine)), weekInfo.WeekNumber)
 		_ = h.adapter.SendMessage(ctx, chatID, text)
 		return
 	}
@@ -321,9 +382,9 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 			"⚔️ Рейд: <b>%s</b>\n"+
 			"👥 Команд: %d\n"+
 			"📅 %s — %s",
-		piscine,
+		escapeHTML(string(piscine)),
 		weekInfo.WeekNumber,
-		raid.RaidName,
+		escapeHTML(raid.RaidName),
 		raid.TeamsCount,
 		raid.StartDate.Format("02.01 15:04"),
 		raid.EndDate.Format("02.01 15:04"),
@@ -334,8 +395,16 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 	}
 }
 
+// htmlEscaper escapes the characters significant in Telegram's HTML parse mode.
+// strings.Replacer runs in a single left-to-right pass, so "&" -> "&amp;" is not
+// re-escaped. (go-telegram/bot has no EscapeHTML helper — only EscapeMarkdown.)
+var htmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// escapeHTML escapes externally-sourced text before interpolation into an
+// HTML-parse-mode message.
+func escapeHTML(s string) string { return htmlEscaper.Replace(s) }
+
 // parsePiscineFromCallback extracts the piscine type from callback data.
-// E.g. "defense_create:Piscine Go" → "Piscine Go"
 func parsePiscineFromCallback(data, prefix string) string {
 	if !strings.HasPrefix(data, prefix) {
 		return ""
@@ -343,7 +412,9 @@ func parsePiscineFromCallback(data, prefix string) string {
 	return strings.TrimPrefix(data, prefix)
 }
 
-// nextMonday returns the date of the next Monday from the given time.
+// nextMonday returns the date of the next Monday from the given time, at
+// midnight in the input's location. Pass a time already converted to the
+// desired location (e.g. time.Now().In(loc)) to avoid timezone drift.
 func nextMonday(t time.Time) time.Time {
 	daysUntilMonday := (8 - int(t.Weekday())) % 7
 	if daysUntilMonday == 0 {

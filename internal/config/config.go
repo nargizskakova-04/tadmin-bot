@@ -17,6 +17,11 @@ type Config struct {
 	TelegramToken string
 	ChatIDs       []int64
 
+	// AdminChatIDs is the authorization allowlist for INCOMING commands and
+	// callbacks. Defaults to ChatIDs when ADMIN_CHAT_IDS is unset, so the bot
+	// only accepts commands from the same chats it broadcasts to.
+	AdminChatIDs []int64
+
 	// 01-edu
 	OneEduBaseURL     string
 	OneEduAccessToken string
@@ -31,17 +36,13 @@ type Config struct {
 	GoogleCredentialsFile string
 
 	// Pre-configured Google Sheets defense tables, indexed by piscine and week.
-	// Missing entries mean "this week's table is not configured" — features that
-	// rely on the table will degrade gracefully (log a warning, skip the work).
 	SheetIDs  map[domain.PiscineType]map[int]string
 	SheetURLs map[domain.PiscineType]map[int]string
 }
 
 // spreadsheetIDRe extracts the spreadsheet ID from a Google Sheets URL.
-// E.g. https://docs.google.com/spreadsheets/d/1AbC.../edit -> "1AbC..."
 var spreadsheetIDRe = regexp.MustCompile(`spreadsheets/d/([a-zA-Z0-9_-]+)`)
 
-// sheetEnvMap maps env variable names to (piscine, week) coordinates.
 var sheetEnvMap = []struct {
 	env     string
 	piscine domain.PiscineType
@@ -70,6 +71,12 @@ func Load() (*Config, error) {
 	}
 	eduURL = ensureScheme(eduURL)
 
+	// SECURITY: refuse cleartext HTTP for the upstream that carries the access
+	// token and all GraphQL traffic, unless an explicit opt-out is set (local dev).
+	if strings.HasPrefix(eduURL, "http://") && os.Getenv("ONEEDU_ALLOW_INSECURE") != "1" {
+		return nil, fmt.Errorf("ONEEDU_BASE_URL must use https:// (set ONEEDU_ALLOW_INSECURE=1 to override for local dev)")
+	}
+
 	eduToken, err := requireEnv("PLATFORM_ACCESS_TOKEN")
 	if err != nil {
 		return nil, err
@@ -80,11 +87,21 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CHAT_IDS: %w", err)
 	}
 
+	// Authorization allowlist for incoming commands. Falls back to CHAT_IDS.
+	adminIDs, err := parseChatIDs(os.Getenv("ADMIN_CHAT_IDS"))
+	if err != nil {
+		return nil, fmt.Errorf("ADMIN_CHAT_IDS: %w", err)
+	}
+	if len(adminIDs) == 0 {
+		adminIDs = chatIDs
+	}
+
 	sheetIDs, sheetURLs := loadSheetMaps()
 
 	return &Config{
 		TelegramToken:         token,
 		ChatIDs:               chatIDs,
+		AdminChatIDs:          adminIDs,
 		OneEduBaseURL:         eduURL,
 		OneEduAccessToken:     eduToken,
 		TemplatesPath:         envOr("TEMPLATES_PATH", "messages"),
@@ -95,9 +112,6 @@ func Load() (*Config, error) {
 	}, nil
 }
 
-// loadSheetMaps reads SHEET_* env variables and extracts spreadsheet IDs
-// from the URLs. Missing or malformed values are skipped silently — the
-// feature is optional and degrades to "table not configured" at runtime.
 func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain.PiscineType]map[int]string) {
 	ids = make(map[domain.PiscineType]map[int]string)
 	urls = make(map[domain.PiscineType]map[int]string)
@@ -109,7 +123,6 @@ func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain
 		}
 		m := spreadsheetIDRe.FindStringSubmatch(raw)
 		if len(m) < 2 || m[1] == "" {
-			// URL is set but doesn't contain a spreadsheet ID — skip it.
 			continue
 		}
 		spreadsheetID := m[1]
@@ -126,7 +139,6 @@ func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain
 	return ids, urls
 }
 
-// requireEnv reads an environment variable and errors if it's empty.
 func requireEnv(name string) (string, error) {
 	v := os.Getenv(name)
 	if v == "" {
@@ -135,7 +147,6 @@ func requireEnv(name string) (string, error) {
 	return v, nil
 }
 
-// envOr reads an environment variable and returns def when it's empty.
 func envOr(name, def string) string {
 	if v := os.Getenv(name); v != "" {
 		return v
@@ -143,7 +154,6 @@ func envOr(name, def string) string {
 	return def
 }
 
-// ensureScheme prepends "https://" if the URL has no http(s) scheme.
 func ensureScheme(url string) string {
 	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 		return url

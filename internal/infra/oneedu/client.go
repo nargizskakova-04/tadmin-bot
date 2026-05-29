@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,10 @@ const (
 	authTokenPath      = "/api/auth/token"
 	authRefreshPath    = "/api/auth/refresh"
 	graphqlEndpointURL = "/api/graphql-engine/v1/graphql"
+
+	// maxResponseBytes caps how much of an upstream response we read into memory,
+	// guarding against a malicious or malfunctioning endpoint causing OOM.
+	maxResponseBytes = 4 << 20 // 4 MiB
 )
 
 // Client communicates with the 01-edu GraphQL API.
@@ -47,6 +53,33 @@ func NewClient(baseURL, accessToken string, logger *slog.Logger) *Client {
 	}
 }
 
+// scrub removes known secrets from an error before it can be logged or returned.
+// In particular, net/http wraps transport failures in *url.Error whose message
+// embeds the full request URL — which historically carried the access token in
+// a query string. We also redact any JWT currently held.
+func (c *Client) scrub(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if c.accessToken != "" {
+		msg = strings.ReplaceAll(msg, c.accessToken, "[REDACTED_ACCESS_TOKEN]")
+	}
+	c.mu.RLock()
+	jwt := c.jwtToken
+	c.mu.RUnlock()
+	if jwt != "" {
+		msg = strings.ReplaceAll(msg, jwt, "[REDACTED_JWT]")
+	}
+	return errors.New(msg)
+}
+
+// readCapped reads at most maxResponseBytes from r, scrubbing nothing (callers
+// scrub before logging). Returns the bytes read so far on error.
+func readCapped(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxResponseBytes))
+}
+
 // RefreshToken obtains a new JWT from the 01-edu auth endpoint.
 func (c *Client) RefreshToken(ctx context.Context) error {
 	c.mu.Lock()
@@ -54,7 +87,7 @@ func (c *Client) RefreshToken(ctx context.Context) error {
 
 	token, exp, err := c.requestToken(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %v", domain.ErrTokenRefresh, err)
+		return fmt.Errorf("%w: %v", domain.ErrTokenRefresh, c.scrub(err))
 	}
 	c.jwtToken = token
 	c.jwtExp = exp
@@ -77,11 +110,7 @@ func (c *Client) GetCurrentPiscineID(ctx context.Context, piscine domain.Piscine
 	}
 
 	ev := resp.Data.Event[0]
-	return &domain.PiscineInfo{
-		ID:      ev.ID,
-		StartAt: ev.StartAt,
-		EndAt:   ev.EndAt,
-	}, nil
+	return &domain.PiscineInfo{ID: ev.ID, StartAt: ev.StartAt, EndAt: ev.EndAt}, nil
 }
 
 // GetRaidsByPiscineID fetches all raid events for a given piscine event ID.
@@ -107,10 +136,7 @@ func (c *Client) GetRaidsByPiscineID(ctx context.Context, piscine domain.Piscine
 
 // GetRaidByName fetches a specific raid event by name.
 func (c *Client) GetRaidByName(ctx context.Context, name string, startAt string) (*domain.RaidInfo, error) {
-	vars := map[string]interface{}{
-		"name":    name,
-		"startAt": startAt,
-	}
+	vars := map[string]interface{}{"name": name, "startAt": startAt}
 
 	var resp raidsResponse
 	if err := c.runQuery(ctx, "GetRaidByName", vars, &resp); err != nil {
@@ -124,8 +150,6 @@ func (c *Client) GetRaidByName(ctx context.Context, name string, startAt string)
 	return &info, nil
 }
 
-// runQuery is the common shape used by all GetX methods: ensure auth, load the
-// embedded query by name, and execute against the GraphQL endpoint.
 func (c *Client) runQuery(ctx context.Context, opName string, vars map[string]interface{}, dest interface{}) error {
 	if err := c.ensureToken(ctx); err != nil {
 		return err
@@ -183,9 +207,8 @@ func (c *Client) ensureToken(ctx context.Context) error {
 	}
 
 	if token != "" {
-		// We have an expired/expiring token; try the cheaper refresh path first.
 		if err := c.refreshJWT(ctx); err != nil {
-			c.logger.Warn("refresh failed, requesting new token", "err", err)
+			c.logger.Warn("refresh failed, requesting new token", "err", c.scrub(err))
 		} else {
 			return nil
 		}
@@ -207,13 +230,14 @@ func (c *Client) refreshJWT(ctx context.Context) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return c.scrub(err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readCapped(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("refresh endpoint returned %d: %s", resp.StatusCode, body)
+		// Do not echo the raw upstream body (may contain tokens); log status only.
+		return fmt.Errorf("refresh endpoint returned status %d", resp.StatusCode)
 	}
 
 	token := extractToken(body)
@@ -232,14 +256,16 @@ func (c *Client) refreshJWT(ctx context.Context) error {
 	return nil
 }
 
-// extractToken trims whitespace and an optional surrounding pair of double quotes
-// (the endpoint sometimes returns the raw JWT, sometimes a JSON string literal).
 func extractToken(body []byte) string {
 	return strings.Trim(strings.TrimSpace(string(body)), `"`)
 }
 
 // parseJWTExpiry decodes the JWT payload and extracts the "exp" claim.
-// RawURLEncoding handles base64url *without* padding, which is what JWTs use.
+//
+// NOTE: this intentionally does NOT verify the signature. The token is issued
+// to this client by the 01-edu platform over a TLS-verified channel and exp is
+// used only for refresh caching, never for an authorization decision. If that
+// ever changes, signature verification MUST be added.
 func parseJWTExpiry(token string) (time.Time, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -263,23 +289,33 @@ func parseJWTExpiry(token string) (time.Time, error) {
 	return time.Unix(int64(claims.Exp), 0), nil
 }
 
+// requestToken bootstraps a JWT using the platform access token.
+//
+// SECURITY: the access token is sent in the X-Access-Token header rather than a
+// URL query string, so it cannot leak via proxy/access logs or via the URL that
+// net/http embeds in *url.Error on transport failures. If your 01-edu
+// deployment only accepts the query-param form, set the legacy query but rely on
+// scrub() to redact it from errors. (Header form is preferred and assumed here.)
 func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
-	url := fmt.Sprintf("%s%s?token=%s", c.baseURL, authTokenPath, c.accessToken)
+	endpoint := c.baseURL + authTokenPath
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", time.Time{}, err
 	}
+	req.Header.Set("X-Access-Token", c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", time.Time{}, err
+		// scrub in case the URL or wrapped error references the token at all.
+		return "", time.Time{}, scrubURLError(err, c.accessToken)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readCapped(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", time.Time{}, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, body)
+		return "", time.Time{}, fmt.Errorf("token endpoint returned status %d", resp.StatusCode)
 	}
 
 	token := extractToken(body)
@@ -294,11 +330,37 @@ func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
 	return token, exp, nil
 }
 
+// scrubURLError redacts the secret from a *url.Error (which embeds the full URL)
+// and from generic errors.
+func scrubURLError(err error, secret string) error {
+	if err == nil || secret == "" {
+		return err
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		ue.URL = strings.ReplaceAll(ue.URL, secret, "[REDACTED]")
+		return ue
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), secret, "[REDACTED]"))
+}
+
+// gqlEnvelope lets us detect GraphQL-level errors (HTTP 200 + "errors" array)
+// before unmarshalling into the typed destination.
+type gqlEnvelope struct {
+	Data   json.RawMessage `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
 func (c *Client) doGraphQL(ctx context.Context, query string, variables map[string]interface{}, dest interface{}) error {
-	body, _ := json.Marshal(map[string]interface{}{
+	body, err := json.Marshal(map[string]interface{}{
 		"query":     query,
 		"variables": variables,
 	})
+	if err != nil {
+		return fmt.Errorf("%w: marshal request: %v", domain.ErrGraphQL, err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+graphqlEndpointURL, bytes.NewReader(body))
 	if err != nil {
@@ -311,16 +373,32 @@ func (c *Client) doGraphQL(ctx context.Context, query string, variables map[stri
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", domain.ErrGraphQL, err)
+		return fmt.Errorf("%w: %v", domain.ErrGraphQL, c.scrub(err))
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%w: status %d — %s", domain.ErrGraphQL, resp.StatusCode, respBody)
+	raw, err := readCapped(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%w: read body: %v", domain.ErrGraphQL, err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: status %d", domain.ErrGraphQL, resp.StatusCode)
+	}
+
+	// Detect GraphQL-level errors returned with a 200 status.
+	var env gqlEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("%w: decode envelope: %v", domain.ErrGraphQL, err)
+	}
+	if len(env.Errors) > 0 {
+		return fmt.Errorf("%w: %s", domain.ErrGraphQL, env.Errors[0].Message)
+	}
+	if len(env.Data) == 0 {
+		return fmt.Errorf("%w: empty data", domain.ErrGraphQL)
+	}
+
+	if err := json.Unmarshal(raw, dest); err != nil {
 		return fmt.Errorf("%w: decode: %v", domain.ErrGraphQL, err)
 	}
 	return nil
