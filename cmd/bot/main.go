@@ -25,6 +25,11 @@ func main() {
 	_ = godotenv.Load()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	if creds := os.Getenv("GOOGLE_CREDENTIALS_JSON"); creds != "" {
+		if err := os.WriteFile("credentials.json", []byte(creds), 0600); err != nil {
+			logger.Error("failed to write credentials.json", "err", err)
+		}
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
