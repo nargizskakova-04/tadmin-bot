@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -27,16 +28,24 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	if creds := os.Getenv("GOOGLE_CREDENTIALS_JSON"); creds != "" {
-		if err := os.WriteFile("credentials.json", []byte(creds), 0600); err != nil {
-			logger.Error("failed to write credentials.json", "err", err)
-		}
-	}
-
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("failed to load config", "err", err)
 		os.Exit(1)
+	}
+
+	// Materialize inline Google credentials, if provided. Railway can't mount
+	// files, so the service-account JSON is passed via GOOGLE_CREDENTIALS_JSON.
+	// Write it to a guaranteed-writable temp path and point the config at it,
+	// rather than the working directory (which may be root-owned/read-only).
+	if creds := os.Getenv("GOOGLE_CREDENTIALS_JSON"); creds != "" {
+		credPath := filepath.Join(os.TempDir(), "credentials.json")
+		if err := os.WriteFile(credPath, []byte(creds), 0600); err != nil {
+			logger.Error("failed to write Google credentials file", "path", credPath, "err", err)
+		} else {
+			cfg.GoogleCredentialsFile = credPath
+			logger.Info("wrote inline Google credentials", "path", credPath)
+		}
 	}
 
 	if len(cfg.AdminChatIDs) == 0 {

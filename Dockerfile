@@ -16,7 +16,6 @@
 ###############################################################################
 # Stage 1 — builder
 ###############################################################################
-# Pin to a specific patch (and ideally a @sha256 digest) for reproducible builds.
 FROM golang:1.22.5-alpine AS builder
 
 WORKDIR /src
@@ -31,8 +30,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o bot ./cmd/bo
 ###############################################################################
 # Stage 2 — final runtime image
 ###############################################################################
-# Pin the runtime base image to a concrete version rather than the moving
-# `latest` tag. Replace with a @sha256 digest in CI for full supply-chain pinning.
 FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates tzdata
@@ -43,6 +40,11 @@ RUN adduser -D -u 10001 appuser
 
 COPY --from=builder /src/bot ./bot
 COPY --from=builder /src/messages ./messages
+
+# The COPYs above land in a root-owned /app. At startup the bot may write
+# credentials.json into its working directory (when GOOGLE_CREDENTIALS_JSON is
+# set), so the unprivileged runtime user must own /app.
+RUN chown -R appuser:appuser /app
 
 USER appuser
 

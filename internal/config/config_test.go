@@ -24,12 +24,12 @@ func strp(s string) *string { return &s }
 // requiredEnvs returns the minimum env set for Load() to succeed.
 func requiredEnvs() map[string]*string {
 	return map[string]*string{
-		"TELEGRAM_TOKEN":        strp("tok"),
-		"ONEEDU_BASE_URL":       strp("https://learn.example.com"),
-		"PLATFORM_ACCESS_TOKEN": strp("ptok"),
-		"CHAT_IDS":              strp(""),
-		"TEMPLATES_PATH":        strp(""),
-		"TIMEZONE":              strp(""),
+		"TELEGRAM_TOKEN":          strp("tok"),
+		"ONEEDU_BASE_URL":         strp("https://learn.example.com"),
+		"PLATFORM_ACCESS_TOKEN":   strp("ptok"),
+		"CHAT_IDS":                strp("-100"), // now required
+		"TEMPLATES_PATH":          strp(""),
+		"TIMEZONE":                strp(""),
 		"GOOGLE_CREDENTIALS_FILE": strp(""),
 	}
 }
@@ -108,6 +108,23 @@ func TestLoad_RequiredFields(t *testing.T) {
 	}
 }
 
+// TestLoad_RequiresChatIDs verifies the bot refuses to start with no chats
+// configured, rather than coming up inert (no broadcast targets, all commands
+// rejected via the empty admin allowlist).
+func TestLoad_RequiresChatIDs(t *testing.T) {
+	envs := requiredEnvs()
+	envs["CHAT_IDS"] = strp("")
+	setEnv(t, envs)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when CHAT_IDS is empty")
+	}
+	if !strings.Contains(err.Error(), "CHAT_IDS") {
+		t.Errorf("error should mention CHAT_IDS, got: %v", err)
+	}
+}
+
 func TestLoad_AddsHttpsSchemeWhenMissing(t *testing.T) {
 	envs := requiredEnvs()
 	envs["ONEEDU_BASE_URL"] = strp("learn.example.com")
@@ -123,18 +140,28 @@ func TestLoad_AddsHttpsSchemeWhenMissing(t *testing.T) {
 }
 
 func TestLoad_KeepsExistingScheme(t *testing.T) {
-	for _, u := range []string{"http://insecure.example.com", "https://secure.example.com"} {
-		u := u
-		t.Run(u, func(t *testing.T) {
+	cases := []struct {
+		url      string
+		insecure bool // http:// requires the explicit ONEEDU_ALLOW_INSECURE opt-out
+	}{
+		{"http://insecure.example.com", true},
+		{"https://secure.example.com", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.url, func(t *testing.T) {
 			envs := requiredEnvs()
-			envs["ONEEDU_BASE_URL"] = strp(u)
+			envs["ONEEDU_BASE_URL"] = strp(tc.url)
+			if tc.insecure {
+				envs["ONEEDU_ALLOW_INSECURE"] = strp("1")
+			}
 			setEnv(t, envs)
 			cfg, err := Load()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.OneEduBaseURL != u {
-				t.Errorf("URL=%q, want %q (unchanged)", cfg.OneEduBaseURL, u)
+			if cfg.OneEduBaseURL != tc.url {
+				t.Errorf("URL=%q, want %q (unchanged)", cfg.OneEduBaseURL, tc.url)
 			}
 		})
 	}

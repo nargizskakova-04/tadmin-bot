@@ -59,6 +59,7 @@ var sheetEnvMap = []struct {
 }
 
 // Load reads configuration from the environment.
+// Load reads configuration from the environment.
 func Load() (*Config, error) {
 	token, err := requireEnv("TELEGRAM_TOKEN")
 	if err != nil {
@@ -85,6 +86,12 @@ func Load() (*Config, error) {
 	chatIDs, err := parseChatIDs(os.Getenv("CHAT_IDS"))
 	if err != nil {
 		return nil, fmt.Errorf("CHAT_IDS: %w", err)
+	}
+	// CHAT_IDS is required: with no chats the scheduler broadcasts to nobody and
+	// (since AdminChatIDs falls back to it) every command is rejected — a deploy
+	// that looks healthy but is completely inert. Fail loudly at startup instead.
+	if len(chatIDs) == 0 {
+		return nil, fmt.Errorf("CHAT_IDS is required: provide a comma-separated list of chat IDs")
 	}
 
 	// Authorization allowlist for incoming commands. Falls back to CHAT_IDS.
