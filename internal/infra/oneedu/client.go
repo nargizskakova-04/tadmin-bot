@@ -67,6 +67,22 @@ func (c *Client) scrub(err error) error {
 	return err
 }
 
+// scrubSecrets redacts known secrets (the access token and the JWT currently
+// held) from an arbitrary string, so an upstream response body surfaced for
+// debugging can be logged/returned safely. Callers that already hold c.mu must
+// not expect this to take the lock — it reads c.jwtToken without locking and is
+// only used on paths where the caller already owns the lock (or where a stale
+// read is harmless).
+func (c *Client) scrubSecrets(s string) string {
+	if c.accessToken != "" {
+		s = strings.ReplaceAll(s, c.accessToken, "[REDACTED_ACCESS_TOKEN]")
+	}
+	if c.jwtToken != "" {
+		s = strings.ReplaceAll(s, c.jwtToken, "[REDACTED_JWT]")
+	}
+	return strings.TrimSpace(s)
+}
+
 // readCapped reads at most maxResponseBytes from r, scrubbing nothing (callers
 // scrub before logging). Returns the bytes read so far on error.
 func readCapped(r io.Reader) ([]byte, error) {
@@ -229,8 +245,10 @@ func (c *Client) refreshJWT(ctx context.Context) error {
 
 	body, _ := readCapped(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		// Do not echo the raw upstream body (may contain tokens); log status only.
-		return fmt.Errorf("refresh endpoint returned status %d", resp.StatusCode)
+		// Surface the (scrubbed) upstream body — a refresh failure body almost
+		// never contains the token itself, and scrubSecrets redacts it if it does.
+		return fmt.Errorf("refresh endpoint returned status %d: %s",
+			resp.StatusCode, c.scrubSecrets(string(body)))
 	}
 
 	token := extractToken(body)
@@ -284,31 +302,39 @@ func parseJWTExpiry(token string) (time.Time, error) {
 
 // requestToken bootstraps a JWT using the platform access token.
 //
-// SECURITY: the access token is sent in the X-Access-Token header rather than a
-// URL query string, so it cannot leak via proxy/access logs or via the URL that
-// net/http embeds in *url.Error on transport failures. If your 01-edu
-// deployment only accepts the query-param form, set the legacy query but rely on
-// scrub() to redact it from errors. (Header form is preferred and assumed here.)
+// The 01-edu deployment exchanges the opaque access token for a JWT at
+//
+//	GET /api/auth/token?token=<access-token>
+//
+// returning the JWT as a quoted string. The token MUST ride in the query
+// string: this endpoint rejects the X-Access-Token header, an Authorization:
+// Bearer value, and a JSON body (verified empirically — all return 4xx/5xx).
+//
+// SECURITY: a token in the query string can leak into *url.Error messages on
+// transport failures and into upstream access logs. scrubURLError() redacts it
+// from any error we return or log; the access-log exposure is inherent to the
+// only request form this endpoint accepts.
 func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
-	endpoint := c.baseURL + authTokenPath
+	endpoint := c.baseURL + authTokenPath + "?" + url.Values{"token": {c.accessToken}}.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	req.Header.Set("X-Access-Token", c.accessToken)
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// scrub in case the URL or wrapped error references the token at all.
+		// The token is in the URL; redact it from any transport error.
 		return "", time.Time{}, scrubURLError(err, c.accessToken)
 	}
 	defer resp.Body.Close()
 
 	body, _ := readCapped(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", time.Time{}, fmt.Errorf("token endpoint returned status %d", resp.StatusCode)
+		// Surface the (scrubbed) upstream body so a 4xx names its own cause
+		// instead of hiding behind a bare status code.
+		return "", time.Time{}, fmt.Errorf("token endpoint returned status %d: %s",
+			resp.StatusCode, c.scrubSecrets(string(body)))
 	}
 
 	token := extractToken(body)
