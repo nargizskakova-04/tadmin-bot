@@ -30,6 +30,11 @@ const (
 	// maxResponseBytes caps how much of an upstream response we read into memory,
 	// guarding against a malicious or malfunctioning endpoint causing OOM.
 	maxResponseBytes = 4 << 20 // 4 MiB
+
+	// errBodyLimit bounds how much of an upstream body we splice into an error
+	// message. The body is capped at maxResponseBytes for reading, but an error
+	// string should stay small.
+	errBodyLimit = 1024
 )
 
 // Client communicates with the 01-edu GraphQL API.
@@ -53,10 +58,15 @@ func NewClient(baseURL, accessToken string, logger *slog.Logger) *Client {
 	}
 }
 
-// scrub removes known secrets from an error before it can be logged or returned.
-// In particular, net/http wraps transport failures in *url.Error whose message
-// embeds the full request URL — which historically carried the access token in
-// a query string. We also redact any JWT currently held.
+// scrub redacts the platform access token from an error before it is logged or
+// returned. The access token is immutable after construction, so reading it
+// needs no lock — which is why this helper is safe to call from both locked
+// paths (RefreshToken, refreshJWT) and unlocked ones (ensureToken, doGraphQL).
+//
+// It deliberately does NOT touch the JWT: the JWT only ever travels in request
+// headers (x-jwt-token / Authorization), and net/http never embeds headers in
+// the *url.Error it returns on transport failure. Response *bodies* that might
+// echo a JWT are cleaned with scrubSecrets instead.
 func (c *Client) scrub(err error) error {
 	if err == nil || c.accessToken == "" {
 		return err
@@ -67,20 +77,37 @@ func (c *Client) scrub(err error) error {
 	return err
 }
 
-// scrubSecrets redacts known secrets (the access token and the JWT currently
-// held) from an arbitrary string, so an upstream response body surfaced for
-// debugging can be logged/returned safely. Callers that already hold c.mu must
-// not expect this to take the lock — it reads c.jwtToken without locking and is
-// only used on paths where the caller already owns the lock (or where a stale
-// read is harmless).
+// scrubString removes the given secrets from s. Pure helper with no receiver so
+// callers control exactly which (lock-protected) values they pass in.
+func scrubString(s, accessToken, jwt string) string {
+	if accessToken != "" {
+		s = strings.ReplaceAll(s, accessToken, "[REDACTED_ACCESS_TOKEN]")
+	}
+	if jwt != "" {
+		s = strings.ReplaceAll(s, jwt, "[REDACTED_JWT]")
+	}
+	return s
+}
+
+// scrubSecrets redacts the access token and the currently-held JWT from a
+// string (e.g. an upstream response body surfaced for debugging).
+//
+// CONTRACT: callers MUST hold c.mu (read or write). It reads c.jwtToken
+// directly rather than via tokenState() on purpose: its only callers
+// (requestToken, refreshJWT) already hold the write lock, and taking RLock here
+// would deadlock the non-reentrant RWMutex.
 func (c *Client) scrubSecrets(s string) string {
-	if c.accessToken != "" {
-		s = strings.ReplaceAll(s, c.accessToken, "[REDACTED_ACCESS_TOKEN]")
+	return strings.TrimSpace(scrubString(s, c.accessToken, c.jwtToken))
+}
+
+// clip trims and bounds a string for safe inclusion in an error message, so a
+// pathological upstream body can't produce a multi-megabyte error.
+func clip(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		return s[:max] + "…(truncated)"
 	}
-	if c.jwtToken != "" {
-		s = strings.ReplaceAll(s, c.jwtToken, "[REDACTED_JWT]")
-	}
-	return strings.TrimSpace(s)
+	return s
 }
 
 // readCapped reads at most maxResponseBytes from r, scrubbing nothing (callers
@@ -245,10 +272,11 @@ func (c *Client) refreshJWT(ctx context.Context) error {
 
 	body, _ := readCapped(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		// Surface the (scrubbed) upstream body — a refresh failure body almost
-		// never contains the token itself, and scrubSecrets redacts it if it does.
+		// Surface the (scrubbed, bounded) upstream body — a refresh failure body
+		// almost never contains the token itself, and scrubSecrets redacts it if
+		// it does. We hold c.mu here, so scrubSecrets is safe.
 		return fmt.Errorf("refresh endpoint returned status %d: %s",
-			resp.StatusCode, c.scrubSecrets(string(body)))
+			resp.StatusCode, clip(c.scrubSecrets(string(body)), errBodyLimit))
 	}
 
 	token := extractToken(body)
@@ -312,8 +340,9 @@ func parseJWTExpiry(token string) (time.Time, error) {
 //
 // SECURITY: a token in the query string can leak into *url.Error messages on
 // transport failures and into upstream access logs. scrubURLError() redacts it
-// from any error we return or log; the access-log exposure is inherent to the
-// only request form this endpoint accepts.
+// (both raw and URL-encoded forms) from any error we return or log; the
+// access-log exposure is inherent to the only request form this endpoint
+// accepts. Transit is still protected by TLS (config enforces https://).
 func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
 	endpoint := c.baseURL + authTokenPath + "?" + url.Values{"token": {c.accessToken}}.Encode()
 
@@ -324,17 +353,18 @@ func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// The token is in the URL; redact it from any transport error.
+		// The token is in the URL; redact it (raw + encoded) from any transport error.
 		return "", time.Time{}, scrubURLError(err, c.accessToken)
 	}
 	defer resp.Body.Close()
 
 	body, _ := readCapped(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		// Surface the (scrubbed) upstream body so a 4xx names its own cause
-		// instead of hiding behind a bare status code.
+		// Surface the (scrubbed, bounded) upstream body so a 4xx names its own
+		// cause instead of hiding behind a bare status code. We hold c.mu here
+		// (called from RefreshToken under Lock), so scrubSecrets is safe.
 		return "", time.Time{}, fmt.Errorf("token endpoint returned status %d: %s",
-			resp.StatusCode, c.scrubSecrets(string(body)))
+			resp.StatusCode, clip(c.scrubSecrets(string(body)), errBodyLimit))
 	}
 
 	token := extractToken(body)
@@ -350,17 +380,28 @@ func (c *Client) requestToken(ctx context.Context) (string, time.Time, error) {
 }
 
 // scrubURLError redacts the secret from a *url.Error (which embeds the full URL)
-// and from generic errors.
+// and from generic errors. The secret rides in the query string via
+// url.Values.Encode(), so it may appear percent-encoded in the URL; we redact
+// both the raw and the URL-encoded forms, otherwise a token containing +, /, =
+// (common in base64 tokens) would slip past redaction.
 func scrubURLError(err error, secret string) error {
 	if err == nil || secret == "" {
 		return err
 	}
+	encoded := url.QueryEscape(secret) // matches url.Values.Encode()
+	redact := func(s string) string {
+		s = strings.ReplaceAll(s, secret, "[REDACTED]")
+		if encoded != secret {
+			s = strings.ReplaceAll(s, encoded, "[REDACTED]")
+		}
+		return s
+	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		ue.URL = strings.ReplaceAll(ue.URL, secret, "[REDACTED]")
+		ue.URL = redact(ue.URL)
 		return ue
 	}
-	return errors.New(strings.ReplaceAll(err.Error(), secret, "[REDACTED]"))
+	return errors.New(redact(err.Error()))
 }
 
 // gqlEnvelope lets us detect GraphQL-level errors (HTTP 200 + "errors" array)
@@ -386,6 +427,8 @@ func (c *Client) doGraphQL(ctx context.Context, query string, variables map[stri
 		return err
 	}
 
+	// Snapshot the JWT once (lock-safe). We do NOT hold c.mu in this method, so
+	// this token value is also what we hand scrubString below for redaction.
 	token, _ := c.tokenState()
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -411,7 +454,10 @@ func (c *Client) doGraphQL(ctx context.Context, query string, variables map[stri
 		return fmt.Errorf("%w: decode envelope: %v", domain.ErrGraphQL, err)
 	}
 	if len(env.Errors) > 0 {
-		return fmt.Errorf("%w: %s", domain.ErrGraphQL, env.Errors[0].Message)
+		// Defense in depth: an upstream GraphQL message is unlikely to echo a
+		// secret, but scrub it anyway before it reaches the logs.
+		msg := clip(scrubString(env.Errors[0].Message, c.accessToken, token), errBodyLimit)
+		return fmt.Errorf("%w: %s", domain.ErrGraphQL, msg)
 	}
 	if len(env.Data) == 0 {
 		return fmt.Errorf("%w: empty data", domain.ErrGraphQL)

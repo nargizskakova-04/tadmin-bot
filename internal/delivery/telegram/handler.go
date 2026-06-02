@@ -128,7 +128,11 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 	for _, p := range domain.AllPiscines() {
 		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, p)
 		if err != nil {
-			fmt.Fprintf(&sb, "❌ %s: %v\n", escapeHTML(string(p)), escapeHTML(err.Error()))
+			// Do NOT echo err.Error() into the chat: an upstream error can carry
+			// sensitive fragments, and chat messages persist on Telegram's
+			// servers. Log the detail server-side, show a generic line here.
+			h.logger.Error("detect week failed", "piscine", p, "err", err)
+			fmt.Fprintf(&sb, "❌ %s: не удалось получить данные\n", escapeHTML(string(p)))
 			continue
 		}
 
