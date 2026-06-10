@@ -83,6 +83,7 @@ func main() {
 	}
 
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
+	faceUC := usecase.NewFaceUseCase(eduClient, logger)
 
 	tgAdapter, err := telegram.NewAdapter(cfg.TelegramToken, logger)
 	if err != nil {
@@ -92,6 +93,7 @@ func main() {
 
 	handler := delivery.NewHandler(
 		raidUC,
+		faceUC,
 		tgAdapter,
 		sheetsClient,
 		cfg.SheetIDs,

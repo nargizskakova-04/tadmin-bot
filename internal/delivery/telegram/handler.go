@@ -11,6 +11,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"admin-bot/internal/domain"
+	"admin-bot/internal/infra/faceid"
 	"admin-bot/internal/infra/sheets"
 	tgAdapter "admin-bot/internal/infra/telegram"
 	"admin-bot/internal/usecase"
@@ -19,6 +20,7 @@ import (
 // Handler processes Telegram commands and callback queries.
 type Handler struct {
 	raidUC     *usecase.RaidUseCase
+	faceUC     *usecase.FaceUseCase
 	adapter    *tgAdapter.Adapter
 	sheets     *sheets.Client // nil if Google Sheets is not configured
 	sheetIDs   map[domain.PiscineType]map[int]string
@@ -41,6 +43,7 @@ const (
 // (UTC) and the cron timezone.
 func NewHandler(
 	raidUC *usecase.RaidUseCase,
+	faceUC *usecase.FaceUseCase,
 	adapter *tgAdapter.Adapter,
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
@@ -58,6 +61,7 @@ func NewHandler(
 	}
 	return &Handler{
 		raidUC:     raidUC,
+		faceUC:     faceUC,
 		adapter:    adapter,
 		sheets:     sheetsClient,
 		sheetIDs:   sheetIDs,
@@ -99,7 +103,8 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidjs — информация о рейде Piscine JS\n" +
 		"/raidai — информация о рейде Piscine AI\n" +
 		"/week — текущая неделя для всех Piscine\n" +
-		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов"
+		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов\n" +
+		"/face-scripts &lt;логины&gt; — Face ID: zip с фото и Excel-таблица по списку логинов"
 
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send help failed", "err", err)
@@ -230,6 +235,124 @@ func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID st
 		DefenseDate: defenseDate,
 		Schedule:    schedule,
 	})
+}
+
+// HandleFaceScripts handles the /face-scripts command. It accepts a list of
+// logins (separated by spaces, commas or newlines) and replies with a zip
+// archive of the users' photos plus an Excel table.
+func (h *Handler) HandleFaceScripts(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		if update.Message != nil {
+			h.logger.Warn("unauthorized /face-scripts", "chat_id", update.Message.Chat.ID)
+		}
+		return
+	}
+	chatID := update.Message.Chat.ID
+
+	logins := parseLogins(update.Message.Text)
+	if len(logins) == 0 {
+		_ = h.adapter.SendMessage(ctx, chatID,
+			"ℹ️ Укажите логины через пробел, запятую или с новой строки.\n"+
+				"Пример: <code>/face-scripts ivan petr olga</code>")
+		return
+	}
+
+	truncated := false
+	if len(logins) > usecase.MaxFaceLogins {
+		logins = logins[:usecase.MaxFaceLogins]
+		truncated = true
+	}
+
+	_ = h.adapter.SendMessage(ctx, chatID,
+		fmt.Sprintf("⏳ Обрабатываю %d логин(ов)… Это может занять время.", len(logins)))
+
+	records := h.faceUC.Collect(ctx, logins)
+
+	xlsx, err := faceid.BuildExcel(records)
+	if err != nil {
+		h.logger.Error("build face excel failed", "err", err)
+		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось сформировать таблицу. Попробуйте позже.")
+		return
+	}
+
+	zipBytes, photoCount, err := faceid.BuildZip(records)
+	if err != nil {
+		h.logger.Error("build face zip failed", "err", err)
+		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось сформировать архив с фото. Попробуйте позже.")
+		return
+	}
+
+	stamp := h.now().Format("2006-01-02")
+	caption := h.faceSummary(records, photoCount, truncated)
+
+	// Send the table first, then the photo archive.
+	if err := h.adapter.SendDocument(ctx, chatID, "faceid_"+stamp+".xlsx", xlsx, caption); err != nil {
+		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось отправить таблицу.")
+		return
+	}
+
+	if photoCount > 0 {
+		if err := h.adapter.SendDocument(ctx, chatID, "faceid_photos_"+stamp+".zip", zipBytes, ""); err != nil {
+			_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось отправить архив с фото.")
+			return
+		}
+	}
+
+	h.logger.Info("face-scripts finished", "logins", len(logins), "photos", photoCount)
+}
+
+// faceSummary builds the HTML caption with per-batch statistics.
+func (h *Handler) faceSummary(records []usecase.FaceRecord, photoCount int, truncated bool) string {
+	found, notFound, failed := 0, 0, 0
+	for _, r := range records {
+		switch {
+		case r.NotFound:
+			notFound++
+		case r.Err != "":
+			failed++
+		default:
+			found++
+		}
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "✅ Face ID готов\n👥 Найдено: %d\n🖼 Фото: %d", found, photoCount)
+	if notFound > 0 {
+		fmt.Fprintf(&sb, "\n❌ Не найдено: %d", notFound)
+	}
+	if failed > 0 {
+		fmt.Fprintf(&sb, "\n⚠️ Ошибок: %d", failed)
+	}
+	if truncated {
+		fmt.Fprintf(&sb, "\n✂️ Список обрезан до %d логинов", usecase.MaxFaceLogins)
+	}
+	return sb.String()
+}
+
+// parseLogins extracts logins from the command text, dropping the leading
+// "/face-scripts" token and splitting the rest on whitespace, commas and
+// semicolons. Duplicates are removed while preserving first-seen order.
+func parseLogins(text string) []string {
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		return r == ' ' || r == '\n' || r == '\t' || r == '\r' || r == ',' || r == ';'
+	})
+
+	seen := make(map[string]bool)
+	var logins []string
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		// Skip the command token itself (handles "/face-scripts" and
+		// "/face-scripts@BotName").
+		if f == "" || strings.HasPrefix(f, "/") {
+			continue
+		}
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
+		logins = append(logins, f)
+	}
+	return logins
 }
 
 // --- Callback Queries (inline keyboard buttons) ---

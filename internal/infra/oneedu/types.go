@@ -56,3 +56,18 @@ type memberNode struct {
 	ID        int    `json:"id"`
 	UserLogin string `json:"userLogin"`
 }
+
+// userResponse is the response for GetUserByLogin.
+//
+// attrs is a free-form jsonb object on the platform, so it is decoded into a
+// generic map and the relevant fields are pulled out with attrString.
+type userResponse struct {
+	Data struct {
+		User []struct {
+			ID    int                    `json:"id"`
+			Login string                 `json:"login"`
+			Email string                 `json:"email"`
+			Attrs map[string]interface{} `json:"attrs"`
+		} `json:"user"`
+	} `json:"data"`
+}

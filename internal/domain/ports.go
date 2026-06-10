@@ -16,6 +16,15 @@ type OneEduClient interface {
 
 	// GetRaidByName returns a specific raid event by name, starting from a given date.
 	GetRaidByName(ctx context.Context, name string, startAt string) (*RaidInfo, error)
+
+	// GetUserByLogin returns identity fields for the user with the given login.
+	// Returns (nil, nil) when no such user exists.
+	GetUserByLogin(ctx context.Context, login string) (*FaceUser, error)
+
+	// DownloadPhoto fetches a user photo from platform storage by its upload ID.
+	// It returns the raw image bytes and a file extension (e.g. ".jpg")
+	// derived from the response Content-Type.
+	DownloadPhoto(ctx context.Context, photoUploadID string) (data []byte, ext string, err error)
 }
 
 // TemplateRenderer renders message templates with variable substitution.

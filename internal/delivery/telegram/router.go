@@ -13,6 +13,8 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/raidai", bot.MatchTypeExact, h.HandleRaidAI)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/week", bot.MatchTypeExact, h.HandleWeek)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/create_tables", bot.MatchTypeExact, h.CreateTables)
+	// Prefix match because the command carries arguments: "/face-scripts login1 login2".
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/face-scripts", bot.MatchTypePrefix, h.HandleFaceScripts)
 
 	// Callback queries (inline keyboard buttons).
 	// Using MatchTypePrefix because callback data includes piscine type:

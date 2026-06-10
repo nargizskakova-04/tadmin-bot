@@ -118,6 +118,15 @@ query GetRaidsByPiscineAiId($id: Int!) {
   }
 }
 
+query GetUserByLogin($login: String!) {
+  user(where: { login: { _eq: $login } }) {
+    id
+    login
+    email
+    attrs
+  }
+}
+
 query GetCurrentPiscineId($name: String!) {
   event(where: {
     object: { name: { _eq: $name } }

@@ -30,6 +30,12 @@ func (f *fakeEduClient) GetRaidsByPiscineID(_ context.Context, _ domain.PiscineT
 func (f *fakeEduClient) GetRaidByName(_ context.Context, _, _ string) (*domain.RaidInfo, error) {
 	return f.raidByName, f.raidByNameErr
 }
+func (f *fakeEduClient) GetUserByLogin(_ context.Context, _ string) (*domain.FaceUser, error) {
+	return nil, nil
+}
+func (f *fakeEduClient) DownloadPhoto(_ context.Context, _ string) ([]byte, string, error) {
+	return nil, "", nil
+}
 
 // --- helper builders ---
 

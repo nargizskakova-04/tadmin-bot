@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -80,6 +81,26 @@ func (a *Adapter) SendMessageWithKeyboard(ctx context.Context, chatID int64, tex
 		err = a.scrub(err)
 		a.logger.Error("telegram send with keyboard failed", "chat_id", chatID, "err", err)
 		return fmt.Errorf("send message with keyboard: %w", err)
+	}
+	return nil
+}
+
+// SendDocument uploads an in-memory file (e.g. a zip or xlsx) to the chat with
+// an optional HTML caption.
+func (a *Adapter) SendDocument(ctx context.Context, chatID int64, filename string, data []byte, caption string) error {
+	_, err := a.bot.SendDocument(ctx, &bot.SendDocumentParams{
+		ChatID: chatID,
+		Document: &models.InputFileUpload{
+			Filename: filename,
+			Data:     bytes.NewReader(data),
+		},
+		Caption:   caption,
+		ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		err = a.scrub(err)
+		a.logger.Error("telegram send document failed", "chat_id", chatID, "filename", filename, "err", err)
+		return fmt.Errorf("send document: %w", err)
 	}
 	return nil
 }
