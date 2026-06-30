@@ -71,6 +71,24 @@ func TestLoadOperation_BodiesAreDistinct(t *testing.T) {
 	}
 }
 
+func TestLoadOperationFromFiles_ChoosesFirstFileWithOperation(t *testing.T) {
+	// Ensure a query is located across multiple files.
+	got, err := LoadOperationFromFiles([]string{"updates.graphql", "raids.graphql"}, "GetRaidByName")
+	if err != nil {
+		t.Fatalf("LoadOperationFromFiles error: %v", err)
+	}
+	if !strings.HasPrefix(got, "query GetRaidByName") {
+		t.Fatalf("expected GetRaidByName from raids.graphql, got %q", firstLine(got))
+	}
+}
+
+func TestLoadOperationFromFiles_NoFiles(t *testing.T) {
+	_, err := LoadOperationFromFiles(nil, "Anything")
+	if err == nil || !strings.Contains(err.Error(), "no query files provided") {
+		t.Fatalf("expected no query files error, got %v", err)
+	}
+}
+
 func TestLoadOperation_ConcurrentSafe(t *testing.T) {
 	// Forces concurrent first-load. Run with -race to catch issues.
 	resetCacheForTest()

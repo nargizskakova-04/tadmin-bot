@@ -19,6 +19,7 @@ import (
 // Handler processes Telegram commands and callback queries.
 type Handler struct {
 	raidUC     *usecase.RaidUseCase
+	astanaUC   *usecase.AstanaUpdatesUseCase
 	adapter    *tgAdapter.Adapter
 	sheets     *sheets.Client // nil if Google Sheets is not configured
 	sheetIDs   map[domain.PiscineType]map[int]string
@@ -41,6 +42,7 @@ const (
 // (UTC) and the cron timezone.
 func NewHandler(
 	raidUC *usecase.RaidUseCase,
+	updatesUC *usecase.AstanaUpdatesUseCase,
 	adapter *tgAdapter.Adapter,
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
@@ -58,6 +60,7 @@ func NewHandler(
 	}
 	return &Handler{
 		raidUC:     raidUC,
+		astanaUC:   updatesUC,
 		adapter:    adapter,
 		sheets:     sheetsClient,
 		sheetIDs:   sheetIDs,
@@ -155,8 +158,8 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 	}
 }
 
-// CreateTables handles the /create_tables command.
-func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.Update) {
+// HandleTables handles the /create_tables command.
+func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
 		if update.Message != nil {
 			h.logger.Warn("unauthorized /create_tables", "chat_id", update.Message.Chat.ID)
@@ -221,6 +224,33 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 	}
 
 	h.logger.Info("create_tables finished", "updated", updatedCount, "total_lines", len(lines))
+}
+
+func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+	chatID := update.Message.Chat.ID
+
+	var sb strings.Builder
+
+	info, err := h.astanaUC.GetAstanaUpdates(ctx)
+	if err != nil {
+		h.logger.Error("get astana updates failed", "err", err)
+		fmt.Fprintf(&sb, "❌ Не удалось получить данные об обновлениях Astana\n")
+	} else {
+		date := time.Now().In(h.loc).Format("02.01.2006")
+
+		fmt.Fprintf(&sb, "### %s - Астана\n", date)
+		fmt.Fprintf(&sb, "- %d тотал заявок\n", info.Total)
+		fmt.Fprintf(&sb, "- %d тотал прошли игры\n", info.Succeeded)
+		fmt.Fprintf(&sb, "- %d reg на check-in #15\n", info.Checkin)
+		fmt.Fprintf(&sb, "- %d reg на piscine #15\n", info.Piscinego)
+	}
+
+	if err := h.adapter.SendMessage(ctx, chatID, sb.String()); err != nil {
+		h.logger.Error("send astana updates failed", "err", err)
+	}
 }
 
 func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {

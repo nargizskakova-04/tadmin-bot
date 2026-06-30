@@ -21,7 +21,6 @@ import (
 
 const (
 	httpTimeout        = 30 * time.Second
-	queriesFile        = "raids.graphql"
 	tokenExpiryLeeway  = 1 * time.Minute
 	authTokenPath      = "/api/auth/token"
 	authRefreshPath    = "/api/auth/refresh"
@@ -37,6 +36,11 @@ const (
 	errBodyLimit = 1024
 )
 
+var defaultQueryFiles = []string{
+	"raids.graphql",
+	"updates.graphql",
+}
+
 // Client communicates with the 01-edu GraphQL API.
 type Client struct {
 	httpClient  *http.Client
@@ -44,9 +48,10 @@ type Client struct {
 	accessToken string
 	logger      *slog.Logger
 
-	mu       sync.RWMutex
-	jwtToken string
-	jwtExp   time.Time
+	queryFiles []string
+	mu         sync.RWMutex
+	jwtToken   string
+	jwtExp     time.Time
 }
 
 func NewClient(baseURL, accessToken string, logger *slog.Logger) *Client {
@@ -55,6 +60,7 @@ func NewClient(baseURL, accessToken string, logger *slog.Logger) *Client {
 		baseURL:     baseURL,
 		accessToken: accessToken,
 		logger:      logger,
+		queryFiles:  defaultQueryFiles,
 	}
 }
 
@@ -186,11 +192,33 @@ func (c *Client) GetRaidByName(ctx context.Context, name string, startAt string)
 	return &info, nil
 }
 
+// GetRaidByName fetches a specific raid event by name.
+func (c *Client) GetAstanaUpdates(ctx context.Context) (*domain.AstanaUpdatesInfo, error) {
+	now := time.Now()
+	vars := map[string]interface{}{
+		"endDate":   now.Format("2006-01-02T15:04"),
+		"startDate": now.AddDate(0, 0, -360).Format("2006-01-02T15:04"),
+	}
+
+	var resp astanaUpdatesResponse
+	if err := c.runQuery(ctx, "GetAstanaUpdates", vars, &resp); err != nil {
+		return nil, err
+	}
+
+	info := domain.AstanaUpdatesInfo{
+		Total:     resp.Data.TotalAstana.Aggregate.Count,
+		Succeeded: resp.Data.SucceededAstana.Aggregate.Count,
+		Checkin:   resp.Data.CheckinAstana.Aggregate.Count,
+		Piscinego: resp.Data.PiscinegoAstana.Aggregate.Count,
+	}
+	return &info, nil
+}
+
 func (c *Client) runQuery(ctx context.Context, opName string, vars map[string]interface{}, dest interface{}) error {
 	if err := c.ensureToken(ctx); err != nil {
 		return err
 	}
-	query, err := queries.LoadOperation(queriesFile, opName)
+	query, err := queries.LoadOperationFromFiles(c.queryFiles, opName)
 	if err != nil {
 		return fmt.Errorf("load query %s: %w", opName, err)
 	}

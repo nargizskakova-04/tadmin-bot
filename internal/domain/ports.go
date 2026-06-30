@@ -16,6 +16,9 @@ type OneEduClient interface {
 
 	// GetRaidByName returns a specific raid event by name, starting from a given date.
 	GetRaidByName(ctx context.Context, name string, startAt string) (*RaidInfo, error)
+
+	//GetAstanaUpdates returns the latest updates for Astana.
+	GetAstanaUpdates(ctx context.Context) (*AstanaUpdatesInfo, error)
 }
 
 // TemplateRenderer renders message templates with variable substitution.

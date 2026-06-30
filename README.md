@@ -185,3 +185,101 @@ go test -race -v ./internal/config/...
 - [google.golang.org/api](https://pkg.go.dev/google.golang.org/api) — Google Sheets & Drive API
 - [joho/godotenv](https://github.com/joho/godotenv) — загрузка .env
 - 01-edu GraphQL API — данные о рейдах и командах
+
+query {
+  user_aggregate{ #registatration count
+    aggregate {
+      count
+    }
+  }
+  registration_user{ #checkin, piscine
+    userLogin
+    registration{
+      path
+      id
+    }
+  }
+
+}
+
+
+
+
+
+query onboarding_games_stats(
+  $adminRole: String!
+  $startDate: timestamptz!
+  $endDate: timestamptz!
+) {
+  total: user_aggregate{ 
+    aggregate {
+      count
+    }
+  }
+  succeeded: progress_aggregate(
+    where: {
+      path: { _eq: "/astanahub/onboarding/games" }
+      isDone: { _eq: true }
+      grade: { _gte: 1 }
+      updatedAt: { _gt: $startDate, _lt: $endDate }
+      _not: { user: { roles: { slug: { _in: ["admin", $adminRole] } } } }
+    }
+    distinct_on: [userId]
+  ) {
+    aggregate { count }
+  }
+  
+  registration_user{ #checkin, piscine
+    userLogin
+    registration{
+      path
+      id
+    }
+  }
+  
+}
+
+
+готовый скрипт по астане
+query onboarding_games_stats(
+  $startDate: timestamptz!
+  $endDate: timestamptz!
+) {
+  total_astana: user_aggregate{ 
+    aggregate {
+      count
+    }
+  }
+  succeeded_astana: progress_aggregate(
+    where: {
+      path: { _eq: "/astanahub/onboarding/games" }
+      isDone: { _eq: true }
+      grade: { _gte: 1 }
+      updatedAt: { _gt: $startDate, _lt: $endDate }
+      _not: { user: { roles: { slug: { _in: ["admin", "campus_admin_astanahub"] } } } }
+    }
+    distinct_on: [userId]
+  ) {
+    aggregate { count }
+  }
+  
+  checkin_astana: registration_user_aggregate(
+    where: {
+      registration:{path: {_eq: "/astanahub/onboarding/checkin"}}
+    }
+  ){
+    aggregate{
+      count
+    }
+  }
+  
+  piscinego_astana: registration_user_aggregate(
+    where: {
+      registration:{path: {_eq: "/astanahub/piscinego"}}
+    }
+  ){
+    aggregate{
+      count
+    }
+  }
+}

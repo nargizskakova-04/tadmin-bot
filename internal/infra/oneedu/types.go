@@ -56,3 +56,31 @@ type memberNode struct {
 	ID        int    `json:"id"`
 	UserLogin string `json:"userLogin"`
 }
+
+type aggregateCountNode struct {
+	Aggregate struct {
+		Count int `json:"count"`
+	} `json:"aggregate"`
+}
+
+type astanaUpdatesResponse struct {
+	Data astanaUpdatesNode `json:"data"`
+}
+
+type astanaUpdatesNode struct {
+	TotalAstana     aggregateCountNode `json:"total_astana"`
+	SucceededAstana aggregateCountNode `json:"succeeded_astana"`
+	CheckinAstana   aggregateCountNode `json:"checkin_astana"`
+	PiscinegoAstana aggregateCountNode `json:"piscinego_astana"`
+}
+
+type regionUpdatesResponse struct {
+	Data regionUpdatesNode `json:"data"`
+}
+
+type regionUpdatesNode struct {
+	SignedUpNoOnboarding aggregateCountNode `json:"signed_up_no_onboarding"`
+	Succeeded            aggregateCountNode `json:"succeeded"`
+	Checkin              aggregateCountNode `json:"checkin"`
+	Piscinego            aggregateCountNode `json:"piscinego"`
+}

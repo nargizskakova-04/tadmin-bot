@@ -34,15 +34,27 @@ func MustLoad(name string) (string, error) {
 // LoadOperation extracts a single named operation from the .graphql file.
 // For example: LoadOperation("raids.graphql", "GetCurrentPiscineId").
 func LoadOperation(file, operationName string) (string, error) {
-	ops, err := opsFor(file)
-	if err != nil {
-		return "", err
+	return LoadOperationFromFiles([]string{file}, operationName)
+}
+
+// LoadOperationFromFiles searches for a named operation in the provided
+// ordered file list. It returns the first matching operation body.
+func LoadOperationFromFiles(files []string, operationName string) (string, error) {
+	if len(files) == 0 {
+		return "", fmt.Errorf("no query files provided")
 	}
-	q, ok := ops[operationName]
-	if !ok {
-		return "", fmt.Errorf("operation %q not found in %q", operationName, file)
+
+	for _, file := range files {
+		ops, err := opsFor(file)
+		if err != nil {
+			return "", err
+		}
+		if q, ok := ops[operationName]; ok {
+			return q, nil
+		}
 	}
-	return q, nil
+
+	return "", fmt.Errorf("operation %q not found in %v", operationName, files)
 }
 
 // opsFor returns the parsed operation map for a file, caching across calls.

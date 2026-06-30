@@ -12,7 +12,8 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/raidjs", bot.MatchTypeExact, h.HandleRaidJS)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/raidai", bot.MatchTypeExact, h.HandleRaidAI)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/week", bot.MatchTypeExact, h.HandleWeek)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/create_tables", bot.MatchTypeExact, h.CreateTables)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/create_tables", bot.MatchTypeExact, h.HandleTables)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/get_astana_updates", bot.MatchTypeExact, h.HandleAstanaUpdates)
 
 	// Callback queries (inline keyboard buttons).
 	// Using MatchTypePrefix because callback data includes piscine type:

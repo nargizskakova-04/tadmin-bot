@@ -1,0 +1,126 @@
+query GetAstanaUpdates(
+  $startDate: timestamptz!
+  $endDate: timestamptz!
+) {
+  total_astana: user_aggregate{ 
+    aggregate {
+      count
+    }
+  }
+  succeeded_astana: progress_aggregate(
+    where: {
+      path: { _eq: "/astanahub/onboarding/games" }
+      isDone: { _eq: true }
+      grade: { _gte: 1 }
+      updatedAt: { _gt: $startDate, _lt: $endDate }
+      _not: { user: { roles: { slug: { _in: ["admin", "campus_admin_astanahub"] } } } }
+    }
+    distinct_on: [userId]
+  ) {
+    aggregate { count }
+  }
+  
+  checkin_astana: registration_user_aggregate(
+    where: {
+      registration:{
+        path: {_eq: "/astanahub/onboarding/checkin"}
+        endAt: {_gt: $endDate}
+      }
+    }
+  ){
+    aggregate{
+      count
+    }
+  }
+  
+  piscinego_astana: registration_user_aggregate(
+    where: {
+      registration:{
+        path: {_eq: "/astanahub/piscinego"}
+        endAt: {_gt: $endDate}
+      }
+    }
+  ){
+    aggregate{
+      count
+    }
+  }
+}
+
+query region_stats(
+  $paths: [String!]!
+  $startDate: timestamptz!
+  $endDate: timestamptz!
+  $adminRole: String!
+  $gamesPath: String!
+  $checkinPath: String!
+  $piscinegoPath: String!
+) {
+  signed_up_no_onboarding: user_aggregate(
+    where: {
+      _and: [
+        { _not: { progresses: { path: { _in: $paths } } } }
+        { _not: { roles: { slug: { _in: ["admin", $adminRole] } } } }
+        { updatedAt: { _gt: $startDate } }
+        { updatedAt: { _lt: $endDate } }
+        {
+          sessions: {
+            created_at: { _gt: $startDate, _lt: $endDate }
+            final_score: { _gt: 60, _lt: 90 }
+          }
+        }
+      ]
+    }
+  ) {
+    aggregate {
+      count
+    }
+  }
+
+  succeeded: progress_aggregate(
+    where: {
+      path: { _eq: $gamesPath }
+      isDone: { _eq: true }
+      grade: { _gte: 1 }
+      updatedAt: { _gt: $startDate, _lt: $endDate }
+      _not: {
+        user: {
+          roles: {
+            slug: { _in: ["admin", $adminRole] }
+          }
+        }
+      }
+    }
+    distinct_on: [userId]
+  ) {
+    aggregate {
+      count
+    }
+  }
+
+  checkin: registration_user_aggregate(
+    where: {
+      registration: {
+        path: { _eq: $checkinPath }
+        endAt: {_gt: $endDate}
+      }
+    }
+  ) {
+    aggregate {
+      count
+    }
+  }
+
+  piscinego: registration_user_aggregate(
+    where: {
+      registration: {
+        path: { _eq: $piscinegoPath }
+        endAt: {_gt: $endDate}
+      }
+    }
+  ) {
+    aggregate {
+      count
+    }
+  }
+}
