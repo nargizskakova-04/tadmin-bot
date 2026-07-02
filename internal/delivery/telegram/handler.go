@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,7 +20,7 @@ import (
 // Handler processes Telegram commands and callback queries.
 type Handler struct {
 	raidUC     *usecase.RaidUseCase
-	astanaUC   *usecase.AstanaUpdatesUseCase
+	updatesUC  *usecase.UpdatesUseCase
 	adapter    *tgAdapter.Adapter
 	sheets     *sheets.Client // nil if Google Sheets is not configured
 	sheetIDs   map[domain.PiscineType]map[int]string
@@ -42,7 +43,7 @@ const (
 // (UTC) and the cron timezone.
 func NewHandler(
 	raidUC *usecase.RaidUseCase,
-	updatesUC *usecase.AstanaUpdatesUseCase,
+	updatesUC *usecase.UpdatesUseCase,
 	adapter *tgAdapter.Adapter,
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
@@ -60,7 +61,7 @@ func NewHandler(
 	}
 	return &Handler{
 		raidUC:     raidUC,
-		astanaUC:   updatesUC,
+		updatesUC:  updatesUC,
 		adapter:    adapter,
 		sheets:     sheetsClient,
 		sheetIDs:   sheetIDs,
@@ -102,7 +103,8 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidjs — информация о рейде Piscine JS\n" +
 		"/raidai — информация о рейде Piscine AI\n" +
 		"/week — текущая неделя для всех Piscine\n" +
-		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов"
+		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов\n" +
+		"/get_region_updates — статистика обновлений по всем регионам"
 
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send help failed", "err", err)
@@ -234,7 +236,7 @@ func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *m
 
 	var sb strings.Builder
 
-	info, err := h.astanaUC.GetAstanaUpdates(ctx)
+	info, err := h.updatesUC.GetAstanaUpdates(ctx)
 	if err != nil {
 		h.logger.Error("get astana updates failed", "err", err)
 		fmt.Fprintf(&sb, "❌ Не удалось получить данные об обновлениях Astana\n")
@@ -244,12 +246,65 @@ func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *m
 		fmt.Fprintf(&sb, "### %s - Астана\n", date)
 		fmt.Fprintf(&sb, "- %d тотал заявок\n", info.Total)
 		fmt.Fprintf(&sb, "- %d тотал прошли игры\n", info.Succeeded)
-		fmt.Fprintf(&sb, "- %d reg на check-in #15\n", info.Checkin)
-		fmt.Fprintf(&sb, "- %d reg на piscine #15\n", info.Piscinego)
+		fmt.Fprintf(&sb, "- %d reg на check-in\n", info.Checkin)
+		fmt.Fprintf(&sb, "- %d reg на piscine\n", info.Piscinego)
 	}
 
 	if err := h.adapter.SendMessage(ctx, chatID, sb.String()); err != nil {
 		h.logger.Error("send astana updates failed", "err", err)
+	}
+}
+
+func (h *Handler) HandleRegionUpdates(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+	chatID := update.Message.Chat.ID
+
+	report, err := h.updatesUC.GetRegionUpdates(ctx)
+	if err != nil {
+		h.logger.Error("get region updates failed", "err", err)
+		text := "❌ Не удалось получить список регионов"
+		if errors.Is(err, domain.ErrNoCampuses) {
+			text = "⚠️ Список регионов пуст"
+		}
+		if sendErr := h.adapter.SendMessage(ctx, chatID, text); sendErr != nil {
+			h.logger.Error("send region updates error failed", "err", sendErr)
+		}
+		return
+	}
+
+	for _, regionErr := range report.Errors {
+		h.logger.Error("get region stats failed", "region", regionErr.Region, "err", regionErr.Err)
+	}
+
+	if len(report.Regions) == 0 {
+		text := "❌ Не удалось получить статистику ни для одного региона"
+		if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
+			h.logger.Error("send empty region updates failed", "err", err)
+		}
+		return
+	}
+
+	for _, info := range report.Regions {
+		if err := h.adapter.SendMessage(ctx, chatID, formatRegionUpdatesMessage(info)); err != nil {
+			h.logger.Error("send region updates failed", "region", info.Region, "err", err)
+		}
+	}
+
+	if len(report.Errors) > 0 {
+		failedRegions := make([]string, 0, len(report.Errors))
+		for _, regionErr := range report.Errors {
+			region := strings.TrimSpace(regionErr.Region)
+			if region == "" {
+				region = "unknown"
+			}
+			failedRegions = append(failedRegions, escapeHTML(region))
+		}
+		text := "⚠️ Не удалось получить данные по регионам: " + strings.Join(failedRegions, ", ")
+		if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
+			h.logger.Error("send partial region updates failed", "err", err)
+		}
 	}
 }
 
@@ -389,6 +444,28 @@ func (h *Handler) SendDefenseReminderWithKeyboard(ctx context.Context, chatID in
 }
 
 // --- Helpers ---
+
+func formatRegionUpdatesMessage(info domain.RegionUpdatesInfo) string {
+	region := strings.TrimSpace(info.Region)
+	if region == "" {
+		region = "unknown"
+	}
+
+	return fmt.Sprintf(
+		"📍 Region: %s\n\n"+
+			"Signed up without onboarding: %d\n"+
+			"Succeeded onboarding games: %d\n"+
+			"Check-in registrations: %d\n"+
+			"Piscine Go registrations: %d\n"+
+			"Core/module users: %d",
+		escapeHTML(region),
+		info.SignedUpWithoutOnboarding,
+		info.SucceededOnboardingGames,
+		info.CheckinRegistrations,
+		info.PiscineGoRegistrations,
+		info.CoreUsers,
+	)
+}
 
 func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, piscine domain.PiscineType) {
 	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {

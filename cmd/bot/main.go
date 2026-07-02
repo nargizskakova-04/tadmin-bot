@@ -83,7 +83,7 @@ func main() {
 	}
 
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
-	astanaUC := usecase.NewAstanaUpdatesUseCase(eduClient)
+	updatesUC := usecase.NewUpdatesUseCase(eduClient)
 	tgAdapter, err := telegram.NewAdapter(cfg.TelegramToken, logger)
 	if err != nil {
 		logger.Error("failed to create telegram adapter", "err", err)
@@ -92,7 +92,7 @@ func main() {
 
 	handler := delivery.NewHandler(
 		raidUC,
-		astanaUC,
+		updatesUC,
 		tgAdapter,
 		sheetsClient,
 		cfg.SheetIDs,

@@ -34,6 +34,8 @@ const (
 	// message. The body is capped at maxResponseBytes for reading, but an error
 	// string should stay small.
 	errBodyLimit = 1024
+
+	regionUpdatesLookbackDays = 360
 )
 
 var defaultQueryFiles = []string{
@@ -192,12 +194,12 @@ func (c *Client) GetRaidByName(ctx context.Context, name string, startAt string)
 	return &info, nil
 }
 
-// GetRaidByName fetches a specific raid event by name.
+// GetAstanaUpdates returns the latest updates for Astana.
 func (c *Client) GetAstanaUpdates(ctx context.Context) (*domain.AstanaUpdatesInfo, error) {
 	now := time.Now()
 	vars := map[string]interface{}{
 		"endDate":   now.Format("2006-01-02T15:04"),
-		"startDate": now.AddDate(0, 0, -360).Format("2006-01-02T15:04"),
+		"startDate": now.AddDate(0, 0, -regionUpdatesLookbackDays).Format("2006-01-02T15:04"),
 	}
 
 	var resp astanaUpdatesResponse
@@ -212,6 +214,109 @@ func (c *Client) GetAstanaUpdates(ctx context.Context) (*domain.AstanaUpdatesInf
 		Piscinego: resp.Data.PiscinegoAstana.Aggregate.Count,
 	}
 	return &info, nil
+}
+
+// GetCampuses fetches all campus names from OneEdu.
+func (c *Client) GetCampuses(ctx context.Context) ([]string, error) {
+	var resp campusesResponse
+	if err := c.runQuery(ctx, "all_campuses", map[string]interface{}{}, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Data == nil {
+		return nil, fmt.Errorf("%w: empty campuses response", domain.ErrGraphQL)
+	}
+	if len(resp.Data.Object) == 0 {
+		return nil, nil
+	}
+
+	campuses := make([]string, 0, len(resp.Data.Object))
+	for _, obj := range resp.Data.Object {
+		name := strings.TrimSpace(obj.Name)
+		if name == "" {
+			c.logger.Warn("skip campus with empty name")
+			continue
+		}
+		campuses = append(campuses, name)
+	}
+	if len(campuses) == 0 {
+		return nil, fmt.Errorf("%w: campuses response contains no valid names", domain.ErrGraphQL)
+	}
+	return campuses, nil
+}
+
+// GetRegionUpdates fetches onboarding and registration stats for one campus.
+func (c *Client) GetRegionUpdates(ctx context.Context, campus string) (*domain.RegionUpdatesInfo, error) {
+	campus = strings.TrimSpace(campus)
+	if campus == "" {
+		return nil, fmt.Errorf("empty campus name")
+	}
+
+	now := time.Now()
+	startDate := now.AddDate(0, 0, -regionUpdatesLookbackDays)
+	vars := buildRegionStatsVariables(campus, startDate, now)
+
+	var resp regionUpdatesResponse
+	if err := c.runQuery(ctx, "region_stats", vars, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Data == nil {
+		return nil, fmt.Errorf("%w: empty region stats response for %s", domain.ErrGraphQL, campus)
+	}
+
+	return mapRegionUpdates(campus, *resp.Data)
+}
+
+func buildRegionStatsVariables(region string, startDate, endDate time.Time) map[string]interface{} {
+	region = strings.TrimSpace(region)
+	return map[string]interface{}{
+		"campus":        region,
+		"startDate":     startDate.Format(time.RFC3339),
+		"endDate":       endDate.Format(time.RFC3339),
+		"adminRole":     "campus_admin_" + region,
+		"gamesPath":     "/" + region + "/onboarding/games",
+		"checkinPath":   "/" + region + "/onboarding/checkin",
+		"piscinegoPath": "/" + region + "/piscinego",
+		"corePath":      "/" + region + "/module",
+	}
+}
+
+func mapRegionUpdates(region string, data regionUpdatesNode) (*domain.RegionUpdatesInfo, error) {
+	signedUp, err := strictCount(data.SignedUpNoOnboarding, "signed_up_no_onboarding")
+	if err != nil {
+		return nil, err
+	}
+	succeeded, err := strictCount(data.Succeeded, "succeeded")
+	if err != nil {
+		return nil, err
+	}
+	checkin, err := strictCount(data.Checkin, "checkin")
+	if err != nil {
+		return nil, err
+	}
+	piscinego, err := strictCount(data.Piscinego, "piscinego")
+	if err != nil {
+		return nil, err
+	}
+	core, err := strictCount(data.Core, "core")
+	if err != nil {
+		return nil, err
+	}
+
+	return &domain.RegionUpdatesInfo{
+		Region:                    region,
+		SignedUpWithoutOnboarding: signedUp,
+		SucceededOnboardingGames:  succeeded,
+		CheckinRegistrations:      checkin,
+		PiscineGoRegistrations:    piscinego,
+		CoreUsers:                 core,
+	}, nil
+}
+
+func strictCount(node strictAggregateCountNode, field string) (int, error) {
+	if node.Aggregate == nil {
+		return 0, fmt.Errorf("%w: missing aggregate for %s", domain.ErrGraphQL, field)
+	}
+	return node.Aggregate.Count, nil
 }
 
 func (c *Client) runQuery(ctx context.Context, opName string, vars map[string]interface{}, dest interface{}) error {

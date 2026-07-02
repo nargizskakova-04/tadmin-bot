@@ -74,13 +74,34 @@ type astanaUpdatesNode struct {
 	PiscinegoAstana aggregateCountNode `json:"piscinego_astana"`
 }
 
+type campusesResponse struct {
+	Data *campusesNode `json:"data"`
+}
+
+type campusesNode struct {
+	Object []campusNode `json:"object"`
+}
+
+type campusNode struct {
+	Name string `json:"name"`
+}
+
 type regionUpdatesResponse struct {
-	Data regionUpdatesNode `json:"data"`
+	Data *regionUpdatesNode `json:"data"`
 }
 
 type regionUpdatesNode struct {
-	SignedUpNoOnboarding aggregateCountNode `json:"signed_up_no_onboarding"`
-	Succeeded            aggregateCountNode `json:"succeeded"`
-	Checkin              aggregateCountNode `json:"checkin"`
-	Piscinego            aggregateCountNode `json:"piscinego"`
+	SignedUpNoOnboarding strictAggregateCountNode `json:"signed_up_no_onboarding"`
+	Succeeded            strictAggregateCountNode `json:"succeeded"`
+	Checkin              strictAggregateCountNode `json:"checkin"`
+	Piscinego            strictAggregateCountNode `json:"piscinego"`
+	Core                 strictAggregateCountNode `json:"core"`
+}
+
+type strictAggregateCountNode struct {
+	Aggregate *countNode `json:"aggregate"`
+}
+
+type countNode struct {
+	Count int `json:"count"`
 }

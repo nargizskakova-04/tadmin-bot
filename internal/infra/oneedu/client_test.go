@@ -105,3 +105,41 @@ func TestParseJWTExpiry_MentionsThreePartsInError(t *testing.T) {
 		t.Errorf("error should mention expected part count, got: %v", err)
 	}
 }
+
+func TestBuildRegionStatsVariables(t *testing.T) {
+	loc := time.FixedZone("ALMT", 6*60*60)
+	start := time.Date(2025, 6, 25, 0, 0, 0, 0, loc)
+	end := time.Date(2026, 6, 30, 23, 59, 59, 0, loc)
+
+	got := buildRegionStatsVariables("shymkent", start, end)
+
+	want := map[string]interface{}{
+		"campus":        "shymkent",
+		"startDate":     "2025-06-25T00:00:00+06:00",
+		"endDate":       "2026-06-30T23:59:59+06:00",
+		"adminRole":     "campus_admin_shymkent",
+		"gamesPath":     "/shymkent/onboarding/games",
+		"checkinPath":   "/shymkent/onboarding/checkin",
+		"piscinegoPath": "/shymkent/piscinego",
+		"corePath":      "/shymkent/module",
+	}
+
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Errorf("%s = %v, want %v", key, got[key], wantValue)
+		}
+	}
+}
+
+func TestMapRegionUpdates_MissingAggregate(t *testing.T) {
+	data := regionUpdatesNode{
+		SignedUpNoOnboarding: strictAggregateCountNode{Aggregate: &countNode{Count: 1}},
+		Succeeded:            strictAggregateCountNode{Aggregate: &countNode{Count: 2}},
+		Checkin:              strictAggregateCountNode{Aggregate: &countNode{Count: 3}},
+		Piscinego:            strictAggregateCountNode{Aggregate: &countNode{Count: 4}},
+	}
+
+	if _, err := mapRegionUpdates("shymkent", data); err == nil {
+		t.Fatal("expected missing aggregate error, got nil")
+	}
+}

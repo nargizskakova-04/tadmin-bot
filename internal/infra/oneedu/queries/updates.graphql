@@ -2,7 +2,7 @@ query GetAstanaUpdates(
   $startDate: timestamptz!
   $endDate: timestamptz!
 ) {
-  total_astana: user_aggregate{ 
+  total_astana: user_aggregate {
     aggregate {
       count
     }
@@ -13,62 +13,70 @@ query GetAstanaUpdates(
       isDone: { _eq: true }
       grade: { _gte: 1 }
       updatedAt: { _gt: $startDate, _lt: $endDate }
-      _not: { user: { roles: { slug: { _in: ["admin", "campus_admin_astanahub"] } } } }
+      _not: {
+        user: {
+          roles: {
+            slug: { _in: ["admin", "campus_admin_astanahub"] }
+          }
+        }
+      }
     }
     distinct_on: [userId]
   ) {
-    aggregate { count }
-  }
-  
-  checkin_astana: registration_user_aggregate(
-    where: {
-      registration:{
-        path: {_eq: "/astanahub/onboarding/checkin"}
-        endAt: {_gt: $endDate}
-      }
-    }
-  ){
-    aggregate{
+    aggregate {
       count
     }
   }
-  
-  piscinego_astana: registration_user_aggregate(
+
+  checkin_astana: registration_user_aggregate(
     where: {
-      registration:{
-        path: {_eq: "/astanahub/piscinego"}
-        endAt: {_gt: $endDate}
+      registration: {
+        path: { _eq: "/astanahub/onboarding/checkin" }
+        endAt: { _gt: $endDate }
       }
     }
-  ){
-    aggregate{
+  ) {
+    aggregate {
+      count
+    }
+  }
+
+  piscinego_astana: registration_user_aggregate(
+    where: {
+      registration: {
+        path: { _eq: "/astanahub/piscinego" }
+        endAt: { _gt: $endDate }
+      }
+    }
+  ) {
+    aggregate {
       count
     }
   }
 }
 
+query all_campuses {
+  object(where: { type: { _eq: "campus" } }) {
+    name
+  }
+}
+
 query region_stats(
-  $paths: [String!]!
+  $campus: String!
   $startDate: timestamptz!
   $endDate: timestamptz!
   $adminRole: String!
   $gamesPath: String!
   $checkinPath: String!
   $piscinegoPath: String!
+  $corePath: String!
 ) {
   signed_up_no_onboarding: user_aggregate(
     where: {
       _and: [
-        { _not: { progresses: { path: { _in: $paths } } } }
-        { _not: { roles: { slug: { _in: ["admin", $adminRole] } } } }
-        { updatedAt: { _gt: $startDate } }
-        { updatedAt: { _lt: $endDate } }
-        {
-          sessions: {
-            created_at: { _gt: $startDate, _lt: $endDate }
-            final_score: { _gt: 60, _lt: 90 }
-          }
-        }
+        { campus: { _is_null: true } }
+        { progresses: { campus: { _eq: $campus } } }
+        { _not: { roles: {} } }
       ]
     }
   ) {
@@ -102,7 +110,7 @@ query region_stats(
     where: {
       registration: {
         path: { _eq: $checkinPath }
-        endAt: {_gt: $endDate}
+        endAt: { _gt: $endDate }
       }
     }
   ) {
@@ -115,7 +123,21 @@ query region_stats(
     where: {
       registration: {
         path: { _eq: $piscinegoPath }
-        endAt: {_gt: $endDate}
+        endAt: { _gt: $endDate }
+      }
+    }
+  ) {
+    aggregate {
+      count
+    }
+  }
+
+  core: event_user_aggregate(
+    where: {
+      event: {
+        path: {
+          _eq: $corePath
+        }
       }
     }
   ) {

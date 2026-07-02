@@ -89,6 +89,32 @@ func TestLoadOperationFromFiles_NoFiles(t *testing.T) {
 	}
 }
 
+func TestLoadOperation_UpdatesOps(t *testing.T) {
+	cases := []string{"all_campuses", "region_stats", "GetAstanaUpdates"}
+	for _, op := range cases {
+		op := op
+		t.Run(op, func(t *testing.T) {
+			got, err := LoadOperation("updates.graphql", op)
+			if err != nil {
+				t.Fatalf("LoadOperation(%q) error: %v", op, err)
+			}
+			if !strings.HasPrefix(got, "query "+op) {
+				t.Fatalf("expected query %s, got %q", op, firstLine(got))
+			}
+		})
+	}
+}
+
+func TestLoadOperation_RegionStatsIncludesCore(t *testing.T) {
+	got, err := LoadOperation("updates.graphql", "region_stats")
+	if err != nil {
+		t.Fatalf("LoadOperation(region_stats) error: %v", err)
+	}
+	if !strings.Contains(got, "$corePath") || !strings.Contains(got, "core: event_user_aggregate") {
+		t.Fatalf("region_stats should include core aggregate, got:\n%s", got)
+	}
+}
+
 func TestLoadOperation_ConcurrentSafe(t *testing.T) {
 	// Forces concurrent first-load. Run with -race to catch issues.
 	resetCacheForTest()

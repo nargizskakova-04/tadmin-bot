@@ -17,8 +17,14 @@ type OneEduClient interface {
 	// GetRaidByName returns a specific raid event by name, starting from a given date.
 	GetRaidByName(ctx context.Context, name string, startAt string) (*RaidInfo, error)
 
-	//GetAstanaUpdates returns the latest updates for Astana.
+	// GetAstanaUpdates returns the latest updates for Astana.
 	GetAstanaUpdates(ctx context.Context) (*AstanaUpdatesInfo, error)
+
+	// GetCampuses returns all campus names from OneEdu.
+	GetCampuses(ctx context.Context) ([]string, error)
+
+	// GetRegionUpdates returns onboarding and registration stats for a campus.
+	GetRegionUpdates(ctx context.Context, campus string) (*RegionUpdatesInfo, error)
 }
 
 // TemplateRenderer renders message templates with variable substitution.

@@ -1,8 +1,11 @@
 package telegram
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"admin-bot/internal/domain"
 )
 
 func TestParsePiscineFromCallback(t *testing.T) {
@@ -83,5 +86,30 @@ func TestNextMonday_PreservesInputLocation(t *testing.T) {
 	got := nextMonday(in)
 	if got.Location().String() != almaty.String() {
 		t.Errorf("nextMonday returned location %q, want %q", got.Location(), almaty)
+	}
+}
+
+func TestFormatRegionUpdatesMessage(t *testing.T) {
+	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region:                    "a<b",
+		SignedUpWithoutOnboarding: 12,
+		SucceededOnboardingGames:  34,
+		CheckinRegistrations:      56,
+		PiscineGoRegistrations:    78,
+		CoreUsers:                 90,
+	})
+
+	wantParts := []string{
+		"📍 Region: a&lt;b",
+		"Signed up without onboarding: 12",
+		"Succeeded onboarding games: 34",
+		"Check-in registrations: 56",
+		"Piscine Go registrations: 78",
+		"Core/module users: 90",
+	}
+	for _, part := range wantParts {
+		if !strings.Contains(got, part) {
+			t.Errorf("formatted message missing %q:\n%s", part, got)
+		}
 	}
 }
