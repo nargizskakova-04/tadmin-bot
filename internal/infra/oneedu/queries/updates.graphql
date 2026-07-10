@@ -61,6 +61,16 @@ query all_campuses {
   }
 }
 
+query GetEventByID($id: Int!) {
+  event(where: { id: { _eq: $id } }) {
+    id
+    path
+    startAt
+    endAt
+    object { type, name }
+  }
+}
+
 query region_stats(
   $campus: String!
   $startDate: timestamptz!

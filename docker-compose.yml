@@ -1,0 +1,50 @@
+# docker-compose for admin-bot — Telegram bot for Piscine announcements &
+# defense tables. Long-polling bot: no published ports, no inbound traffic.
+#
+# Config is injected from .env (same file the binary reads locally). The image
+# itself never contains secrets — .dockerignore keeps .env* out of the build
+# context; compose loads it at runtime via env_file.
+#
+#   docker compose up -d --build      # build + start detached
+#   docker compose logs -f            # follow logs
+#   docker compose stop               # SIGTERM → graceful shutdown
+#   docker compose down               # stop + remove container
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: admin-bot:local
+    container_name: tadmin-bot
+
+    # All required (TELEGRAM_TOKEN, ONEEDU_BASE_URL, PLATFORM_ACCESS_TOKEN,
+    # CHAT_IDS) and optional (ADMIN_CHAT_IDS, TIMEZONE, SHEET_*_WEEK*,
+    # REGION_*_EVENT_ID, GOOGLE_CREDENTIALS_JSON, …) vars come from .env.
+    env_file:
+      - .env
+
+    # Keep the container clock aligned with the cron scheduler's timezone.
+    # tzdata is installed in the image, so this resolves correctly.
+    environment:
+      TZ: ${TIMEZONE:-Asia/Almaty}
+
+    # Railway/Docker send SIGTERM on stop; main.go traps it, stops the cron
+    # scheduler and drains the long-poll loop (WaitGroup) before exiting.
+    # Give that unwind room before Docker escalates to SIGKILL.
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+
+    restart: unless-stopped
+
+    # Bound log growth so a long-running bot doesn't fill the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Optional: mount a service-account file instead of GOOGLE_CREDENTIALS_JSON.
+    # Set GOOGLE_CREDENTIALS_FILE=/secrets/credentials.json in .env to use it.
+    # volumes:
+    #   - ./credentials.json:/secrets/credentials.json:ro

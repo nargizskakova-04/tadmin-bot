@@ -38,13 +38,12 @@ WORKDIR /app
 
 RUN adduser -D -u 10001 appuser
 
-COPY --from=builder /src/bot ./bot
-COPY --from=builder /src/messages ./messages
-
-# The COPYs above land in a root-owned /app. At startup the bot may write
-# credentials.json into its working directory (when GOOGLE_CREDENTIALS_JSON is
-# set), so the unprivileged runtime user must own /app.
-RUN chown -R appuser:appuser /app
+# The bot only reads these at runtime (message templates are loaded from disk;
+# GraphQL queries are embedded in the binary). Inline Google credentials, when
+# provided, are written to os.TempDir() — not /app — so appuser needs no write
+# access here. Copy directly as appuser instead of a separate chown -R layer.
+COPY --from=builder --chown=appuser:appuser /src/bot ./bot
+COPY --from=builder --chown=appuser:appuser /src/messages ./messages
 
 USER appuser
 

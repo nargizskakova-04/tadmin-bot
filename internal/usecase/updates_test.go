@@ -14,6 +14,8 @@ type fakeUpdatesClient struct {
 	stats       map[string]*domain.RegionUpdatesInfo
 	statsErr    map[string]error
 	statsCalls  []string
+	eventsSeen  map[string]domain.RegionUpdateEventsConfig
+	events      map[int]*domain.EventMeta
 }
 
 func (f *fakeUpdatesClient) RefreshToken(ctx context.Context) error {
@@ -43,8 +45,16 @@ func (f *fakeUpdatesClient) GetCampuses(ctx context.Context) ([]string, error) {
 	return f.campuses, nil
 }
 
-func (f *fakeUpdatesClient) GetRegionUpdates(ctx context.Context, campus string) (*domain.RegionUpdatesInfo, error) {
+func (f *fakeUpdatesClient) GetEventByID(ctx context.Context, id int) (*domain.EventMeta, error) {
+	return f.events[id], nil
+}
+
+func (f *fakeUpdatesClient) GetRegionUpdates(ctx context.Context, campus string, events domain.RegionUpdateEventsConfig) (*domain.RegionUpdatesInfo, error) {
 	f.statsCalls = append(f.statsCalls, campus)
+	if f.eventsSeen == nil {
+		f.eventsSeen = map[string]domain.RegionUpdateEventsConfig{}
+	}
+	f.eventsSeen[campus] = events
 	if err := f.statsErr[campus]; err != nil {
 		return nil, err
 	}
@@ -69,7 +79,7 @@ func TestUpdatesUseCaseGetRegionUpdates_ContinuesAfterRegionError(t *testing.T) 
 		},
 	}
 
-	report, err := NewUpdatesUseCase(client).GetRegionUpdates(context.Background())
+	report, err := NewUpdatesUseCase(client, nil).GetRegionUpdates(context.Background())
 	if err != nil {
 		t.Fatalf("GetRegionUpdates returned fatal error: %v", err)
 	}
@@ -92,8 +102,35 @@ func TestUpdatesUseCaseGetRegionUpdates_ContinuesAfterRegionError(t *testing.T) 
 }
 
 func TestUpdatesUseCaseGetRegionUpdates_EmptyCampuses(t *testing.T) {
-	_, err := NewUpdatesUseCase(&fakeUpdatesClient{}).GetRegionUpdates(context.Background())
+	_, err := NewUpdatesUseCase(&fakeUpdatesClient{}, nil).GetRegionUpdates(context.Background())
 	if !errors.Is(err, domain.ErrNoCampuses) {
 		t.Fatalf("error = %v, want ErrNoCampuses", err)
+	}
+}
+
+// TestUpdatesUseCaseGetRegionUpdates_PassesPinnedEvents verifies the usecase
+// looks up each campus's pinned event config (case-insensitively) and forwards
+// it to the client, while campuses without config receive a zero-valued config.
+func TestUpdatesUseCaseGetRegionUpdates_PassesPinnedEvents(t *testing.T) {
+	client := &fakeUpdatesClient{
+		campuses: []string{"astanahub", "shymkent"},
+		stats: map[string]*domain.RegionUpdatesInfo{
+			"astanahub": {Region: "astanahub"},
+			"shymkent":  {Region: "shymkent"},
+		},
+	}
+	regionEvents := map[string]domain.RegionUpdateEventsConfig{
+		"astanahub": {CheckinEventID: 111, PiscineEventID: 222, ModuleEventID: 333},
+	}
+
+	if _, err := NewUpdatesUseCase(client, regionEvents).GetRegionUpdates(context.Background()); err != nil {
+		t.Fatalf("GetRegionUpdates returned error: %v", err)
+	}
+
+	if got := client.eventsSeen["astanahub"]; got != regionEvents["astanahub"] {
+		t.Errorf("astanahub events = %+v, want %+v", got, regionEvents["astanahub"])
+	}
+	if got := client.eventsSeen["shymkent"]; got != (domain.RegionUpdateEventsConfig{}) {
+		t.Errorf("shymkent events = %+v, want zero (path-based fallback)", got)
 	}
 }

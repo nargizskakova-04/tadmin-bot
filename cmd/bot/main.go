@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -83,7 +84,7 @@ func main() {
 	}
 
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
-	updatesUC := usecase.NewUpdatesUseCase(eduClient)
+	updatesUC := usecase.NewUpdatesUseCase(eduClient, cfg.RegionEvents)
 	tgAdapter, err := telegram.NewAdapter(cfg.TelegramToken, logger)
 	if err != nil {
 		logger.Error("failed to create telegram adapter", "err", err)
@@ -111,10 +112,20 @@ func main() {
 	defer stop()
 
 	logger.Info("bot starting…", "timezone", cfg.Timezone, "chats", cfg.ChatIDs)
-	go tgAdapter.Start(ctx)
+
+	// Run long-polling in a goroutine but track it with a WaitGroup so shutdown
+	// waits for the poll loop (and any in-flight update handler) to unwind after
+	// ctx is cancelled, rather than exiting the process mid-request.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tgAdapter.Start(ctx)
+	}()
 
 	<-ctx.Done()
 	logger.Info("shutting down…")
 	sched.Stop()
+	wg.Wait()
 	logger.Info("bye 👋")
 }

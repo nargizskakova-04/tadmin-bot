@@ -23,8 +23,14 @@ type OneEduClient interface {
 	// GetCampuses returns all campus names from OneEdu.
 	GetCampuses(ctx context.Context) ([]string, error)
 
+	// GetEventByID returns the metadata for a single event, or nil if no event
+	// with that ID exists. Used to verify pinned region events.
+	GetEventByID(ctx context.Context, id int) (*EventMeta, error)
+
 	// GetRegionUpdates returns onboarding and registration stats for a campus.
-	GetRegionUpdates(ctx context.Context, campus string) (*RegionUpdatesInfo, error)
+	// events pins the authoritative event IDs for the region; a zero-valued
+	// config makes every metric fall back to the default path-based lookup.
+	GetRegionUpdates(ctx context.Context, campus string, events RegionUpdateEventsConfig) (*RegionUpdatesInfo, error)
 }
 
 // TemplateRenderer renders message templates with variable substitution.

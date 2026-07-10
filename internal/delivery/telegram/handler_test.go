@@ -97,19 +97,41 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 		CheckinRegistrations:      56,
 		PiscineGoRegistrations:    78,
 		CoreUsers:                 90,
-	})
+	}, "02.07.2026")
 
 	wantParts := []string{
-		"📍 Region: a&lt;b",
-		"Signed up without onboarding: 12",
-		"Succeeded onboarding games: 34",
-		"Check-in registrations: 56",
-		"Piscine Go registrations: 78",
-		"Core/module users: 90",
+		"### 02.07.2026 - a&lt;b",
+		"- 12 заявок",
+		"- 34 прошли игры",
+		"- 56 reg на check-in",
+		"- 78 reg на piscine",
 	}
 	for _, part := range wantParts {
 		if !strings.Contains(got, part) {
 			t.Errorf("formatted message missing %q:\n%s", part, got)
 		}
+	}
+}
+
+// TestFormatRegionUpdatesMessage_StaleEvent verifies a metric backed by a stale
+// pinned event is shown as unavailable rather than as a (misleading) count.
+func TestFormatRegionUpdatesMessage_StaleEvent(t *testing.T) {
+	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region:                 "shymkent",
+		CheckinRegistrations:   56,
+		PiscineGoRegistrations: 78,
+		StaleEvents: []domain.StaleEvent{
+			{Type: domain.EventPiscineGo, EventID: 222, Reason: "ended"},
+		},
+	}, "02.07.2026")
+
+	if !strings.Contains(got, "- 56 reg на check-in") {
+		t.Errorf("check-in should still show its count:\n%s", got)
+	}
+	if strings.Contains(got, "78 reg на piscine") {
+		t.Errorf("stale piscine metric must not show its count:\n%s", got)
+	}
+	if !strings.Contains(got, "⚠️ reg на piscine") {
+		t.Errorf("stale piscine metric should be flagged unavailable:\n%s", got)
 	}
 }

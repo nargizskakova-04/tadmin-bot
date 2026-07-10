@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"admin-bot/internal/domain"
 )
 
 func makeJWT(t *testing.T, claims map[string]interface{}) string {
@@ -128,6 +130,70 @@ func TestBuildRegionStatsVariables(t *testing.T) {
 		if got[key] != wantValue {
 			t.Errorf("%s = %v, want %v", key, got[key], wantValue)
 		}
+	}
+}
+
+func TestClassifyPinnedEvent(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	future := now.Add(24 * time.Hour)
+	past := now.Add(-24 * time.Hour)
+
+	cases := []struct {
+		name       string
+		campus     string
+		meta       *domain.EventMeta
+		wantReason string
+		wantPath   string
+	}{
+		{
+			name:     "active event in region -> usable path",
+			campus:   "astanahub",
+			meta:     &domain.EventMeta{ID: 1, Path: "/astanahub/onboarding/checkin", EndAt: future},
+			wantPath: "/astanahub/onboarding/checkin",
+		},
+		{
+			name:       "missing event",
+			campus:     "astanahub",
+			meta:       nil,
+			wantReason: "not found",
+		},
+		{
+			name:       "belongs to another region",
+			campus:     "astanahub",
+			meta:       &domain.EventMeta{ID: 2, Path: "/shymkent/onboarding/checkin", EndAt: future},
+			wantReason: "region mismatch",
+		},
+		{
+			name:       "already ended",
+			campus:     "astanahub",
+			meta:       &domain.EventMeta{ID: 3, Path: "/astanahub/piscinego", EndAt: past},
+			wantReason: "ended",
+		},
+		{
+			name:     "region check skipped when path has no segment",
+			campus:   "astanahub",
+			meta:     &domain.EventMeta{ID: 4, Path: "", EndAt: future},
+			wantPath: "",
+		},
+		{
+			name:       "ended exactly at now is unusable",
+			campus:     "astanahub",
+			meta:       &domain.EventMeta{ID: 5, Path: "/astanahub/piscinego", EndAt: now},
+			wantReason: "ended",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyPinnedEvent(tc.campus, tc.meta, now)
+			if got.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+			if got.Path != tc.wantPath {
+				t.Errorf("path = %q, want %q", got.Path, tc.wantPath)
+			}
+		})
 	}
 }
 

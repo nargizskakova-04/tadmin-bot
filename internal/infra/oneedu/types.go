@@ -74,6 +74,21 @@ type astanaUpdatesNode struct {
 	PiscinegoAstana aggregateCountNode `json:"piscinego_astana"`
 }
 
+// eventByIDResponse is the response for GetEventByID.
+type eventByIDResponse struct {
+	Data struct {
+		Event []eventMetaNode `json:"event"`
+	} `json:"data"`
+}
+
+type eventMetaNode struct {
+	ID      int        `json:"id"`
+	Path    string     `json:"path"`
+	StartAt time.Time  `json:"startAt"`
+	EndAt   time.Time  `json:"endAt"`
+	Object  objectNode `json:"object"`
+}
+
 type campusesResponse struct {
 	Data *campusesNode `json:"data"`
 }

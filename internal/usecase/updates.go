@@ -10,18 +10,33 @@ import (
 
 type UpdatesUseCase struct {
 	eduClient domain.OneEduClient
+
+	// regionEvents maps a lowercased campus name to its pinned event-ID config.
+	// A campus with no entry (or a zero-valued config) uses the default
+	// path-based lookup for every metric.
+	regionEvents map[string]domain.RegionUpdateEventsConfig
 }
 
 type AstanaUpdatesUseCase = UpdatesUseCase
 
-func NewUpdatesUseCase(eduClient domain.OneEduClient) *UpdatesUseCase {
+func NewUpdatesUseCase(eduClient domain.OneEduClient, regionEvents map[string]domain.RegionUpdateEventsConfig) *UpdatesUseCase {
+	if regionEvents == nil {
+		regionEvents = map[string]domain.RegionUpdateEventsConfig{}
+	}
 	return &UpdatesUseCase{
-		eduClient: eduClient,
+		eduClient:    eduClient,
+		regionEvents: regionEvents,
 	}
 }
 
 func NewAstanaUpdatesUseCase(eduClient domain.OneEduClient) *AstanaUpdatesUseCase {
-	return NewUpdatesUseCase(eduClient)
+	return NewUpdatesUseCase(eduClient, nil)
+}
+
+// eventsForRegion returns the pinned event-ID config for a campus, or a
+// zero-valued config (all metrics path-based) when nothing is configured.
+func (u *UpdatesUseCase) eventsForRegion(campus string) domain.RegionUpdateEventsConfig {
+	return u.regionEvents[strings.ToLower(strings.TrimSpace(campus))]
 }
 
 func (u *UpdatesUseCase) GetAstanaUpdates(ctx context.Context) (domain.AstanaUpdatesInfo, error) {
@@ -59,7 +74,7 @@ func (u *UpdatesUseCase) GetRegionUpdates(ctx context.Context) (domain.RegionUpd
 			continue
 		}
 
-		info, err := u.eduClient.GetRegionUpdates(ctx, campus)
+		info, err := u.eduClient.GetRegionUpdates(ctx, campus, u.eventsForRegion(campus))
 		if err != nil {
 			report.Errors = append(report.Errors, domain.RegionUpdatesError{
 				Region: campus,
