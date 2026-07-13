@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"admin-bot/internal/domain"
 )
 
 // setEnv sets envs for the duration of the test and restores them on cleanup.
@@ -216,6 +218,41 @@ func TestEnvOr(t *testing.T) {
 	}
 	if got := envOr("X_UNSET_LIKELY_NOT_EXISTING", "def"); got != "def" {
 		t.Errorf("envOr unset = %q, want %q", got, "def")
+	}
+}
+
+func TestLoadRegionEvents_MergesPerRegionOverrides(t *testing.T) {
+	// A region with all three metrics pinned, and another with only one — the
+	// unset metrics of the second must stay zero (path-based fallback).
+	t.Setenv("REGION_ASTANAHUB_CHECKIN_EVENT_ID", "111")
+	t.Setenv("REGION_ASTANAHUB_PISCINE_EVENT_ID", "222")
+	t.Setenv("REGION_ASTANAHUB_MODULE_EVENT_ID", "333")
+	t.Setenv("REGION_SHYMKENT_PISCINE_EVENT_ID", "444")
+
+	got, err := loadRegionEvents()
+	if err != nil {
+		t.Fatalf("loadRegionEvents: %v", err)
+	}
+
+	if got["astanahub"] != (domain.RegionUpdateEventsConfig{CheckinEventID: 111, PiscineEventID: 222, ModuleEventID: 333}) {
+		t.Errorf("astanahub = %+v", got["astanahub"])
+	}
+	if got["shymkent"] != (domain.RegionUpdateEventsConfig{PiscineEventID: 444}) {
+		t.Errorf("shymkent = %+v, want only PiscineEventID pinned", got["shymkent"])
+	}
+}
+
+func TestLoadRegionEvents_RejectsNonNumeric(t *testing.T) {
+	t.Setenv("REGION_ASTANAHUB_CHECKIN_EVENT_ID", "not-a-number")
+	if _, err := loadRegionEvents(); err == nil {
+		t.Fatal("expected error for non-numeric event ID")
+	}
+}
+
+func TestLoadRegionEvents_RejectsNonPositive(t *testing.T) {
+	t.Setenv("REGION_ASTANAHUB_CHECKIN_EVENT_ID", "0")
+	if _, err := loadRegionEvents(); err == nil {
+		t.Fatal("expected error for non-positive event ID")
 	}
 }
 

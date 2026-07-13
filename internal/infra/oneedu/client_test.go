@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"admin-bot/internal/domain"
 )
 
 func makeJWT(t *testing.T, claims map[string]interface{}) string {
@@ -103,5 +105,107 @@ func TestParseJWTExpiry_MentionsThreePartsInError(t *testing.T) {
 	_, err := parseJWTExpiry("a.b")
 	if err == nil || !strings.Contains(err.Error(), "3 parts") {
 		t.Errorf("error should mention expected part count, got: %v", err)
+	}
+}
+
+func TestBuildRegionStatsVariables(t *testing.T) {
+	loc := time.FixedZone("ALMT", 6*60*60)
+	start := time.Date(2025, 6, 25, 0, 0, 0, 0, loc)
+	end := time.Date(2026, 6, 30, 23, 59, 59, 0, loc)
+
+	got := buildRegionStatsVariables("shymkent", start, end)
+
+	want := map[string]interface{}{
+		"campus":        "shymkent",
+		"startDate":     "2025-06-25T00:00:00+06:00",
+		"endDate":       "2026-06-30T23:59:59+06:00",
+		"adminRole":     "campus_admin_shymkent",
+		"gamesPath":     "/shymkent/onboarding/games",
+		"checkinPath":   "/shymkent/onboarding/checkin",
+		"piscinegoPath": "/shymkent/piscinego",
+		"corePath":      "/shymkent/module",
+	}
+
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Errorf("%s = %v, want %v", key, got[key], wantValue)
+		}
+	}
+}
+
+func TestClassifyPinnedEvent(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	future := now.Add(24 * time.Hour)
+	past := now.Add(-24 * time.Hour)
+
+	cases := []struct {
+		name       string
+		campus     string
+		meta       *domain.EventMeta
+		wantReason string
+		wantPath   string
+	}{
+		{
+			name:     "active event in region -> usable path",
+			campus:   "astanahub",
+			meta:     &domain.EventMeta{ID: 1, Path: "/astanahub/onboarding/checkin", EndAt: future},
+			wantPath: "/astanahub/onboarding/checkin",
+		},
+		{
+			name:       "missing event",
+			campus:     "astanahub",
+			meta:       nil,
+			wantReason: "not found",
+		},
+		{
+			name:       "belongs to another region",
+			campus:     "astanahub",
+			meta:       &domain.EventMeta{ID: 2, Path: "/shymkent/onboarding/checkin", EndAt: future},
+			wantReason: "region mismatch",
+		},
+		{
+			name:       "already ended",
+			campus:     "astanahub",
+			meta:       &domain.EventMeta{ID: 3, Path: "/astanahub/piscinego", EndAt: past},
+			wantReason: "ended",
+		},
+		{
+			name:     "region check skipped when path has no segment",
+			campus:   "astanahub",
+			meta:     &domain.EventMeta{ID: 4, Path: "", EndAt: future},
+			wantPath: "",
+		},
+		{
+			name:       "ended exactly at now is unusable",
+			campus:     "astanahub",
+			meta:       &domain.EventMeta{ID: 5, Path: "/astanahub/piscinego", EndAt: now},
+			wantReason: "ended",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyPinnedEvent(tc.campus, tc.meta, now)
+			if got.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+			if got.Path != tc.wantPath {
+				t.Errorf("path = %q, want %q", got.Path, tc.wantPath)
+			}
+		})
+	}
+}
+
+func TestMapRegionUpdates_MissingAggregate(t *testing.T) {
+	data := regionUpdatesNode{
+		SignedUpNoOnboarding: strictAggregateCountNode{Aggregate: &countNode{Count: 1}},
+		Succeeded:            strictAggregateCountNode{Aggregate: &countNode{Count: 2}},
+		Checkin:              strictAggregateCountNode{Aggregate: &countNode{Count: 3}},
+		Piscinego:            strictAggregateCountNode{Aggregate: &countNode{Count: 4}},
+	}
+
+	if _, err := mapRegionUpdates("shymkent", data); err == nil {
+		t.Fatal("expected missing aggregate error, got nil")
 	}
 }

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,6 +20,7 @@ import (
 // Handler processes Telegram commands and callback queries.
 type Handler struct {
 	raidUC     *usecase.RaidUseCase
+	updatesUC  *usecase.UpdatesUseCase
 	adapter    *tgAdapter.Adapter
 	sheets     *sheets.Client // nil if Google Sheets is not configured
 	sheetIDs   map[domain.PiscineType]map[int]string
@@ -41,6 +43,7 @@ const (
 // (UTC) and the cron timezone.
 func NewHandler(
 	raidUC *usecase.RaidUseCase,
+	updatesUC *usecase.UpdatesUseCase,
 	adapter *tgAdapter.Adapter,
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
@@ -58,6 +61,7 @@ func NewHandler(
 	}
 	return &Handler{
 		raidUC:     raidUC,
+		updatesUC:  updatesUC,
 		adapter:    adapter,
 		sheets:     sheetsClient,
 		sheetIDs:   sheetIDs,
@@ -99,7 +103,9 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidjs — информация о рейде Piscine JS\n" +
 		"/raidai — информация о рейде Piscine AI\n" +
 		"/week — текущая неделя для всех Piscine\n" +
-		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов"
+		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов\n" +
+		"/get_region_updates — статистика обновлений по всем регионам\n" +
+		"/get_astana_updates — статистика обновлений Astana\n"
 
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send help failed", "err", err)
@@ -155,8 +161,8 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 	}
 }
 
-// CreateTables handles the /create_tables command.
-func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.Update) {
+// HandleTables handles the /create_tables command.
+func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
 		if update.Message != nil {
 			h.logger.Warn("unauthorized /create_tables", "chat_id", update.Message.Chat.ID)
@@ -221,6 +227,87 @@ func (h *Handler) CreateTables(ctx context.Context, b *bot.Bot, update *models.U
 	}
 
 	h.logger.Info("create_tables finished", "updated", updatedCount, "total_lines", len(lines))
+}
+
+func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+	chatID := update.Message.Chat.ID
+
+	var sb strings.Builder
+
+	info, err := h.updatesUC.GetAstanaUpdates(ctx)
+	if err != nil {
+		h.logger.Error("get astana updates failed", "err", err)
+		fmt.Fprintf(&sb, "❌ Не удалось получить данные об обновлениях Astana\n")
+	} else {
+		date := time.Now().In(h.loc).Format("02.01.2006")
+
+		fmt.Fprintf(&sb, "### %s - Астана\n", date)
+		fmt.Fprintf(&sb, "- %d тотал заявок\n", info.Total)
+		fmt.Fprintf(&sb, "- %d тотал прошли игры\n", info.Succeeded)
+		fmt.Fprintf(&sb, "- %d reg на check-in\n", info.Checkin)
+		fmt.Fprintf(&sb, "- %d reg на piscine\n", info.Piscinego)
+	}
+
+	if err := h.adapter.SendMessage(ctx, chatID, sb.String()); err != nil {
+		h.logger.Error("send astana updates failed", "err", err)
+	}
+}
+
+func (h *Handler) HandleRegionUpdates(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+	chatID := update.Message.Chat.ID
+
+	report, err := h.updatesUC.GetRegionUpdates(ctx)
+	if err != nil {
+		h.logger.Error("get region updates failed", "err", err)
+		text := "❌ Не удалось получить список регионов"
+		if errors.Is(err, domain.ErrNoCampuses) {
+			text = "⚠️ Список регионов пуст"
+		}
+		if sendErr := h.adapter.SendMessage(ctx, chatID, text); sendErr != nil {
+			h.logger.Error("send region updates error failed", "err", sendErr)
+		}
+		return
+	}
+
+	for _, regionErr := range report.Errors {
+		h.logger.Error("get region stats failed", "region", regionErr.Region, "err", regionErr.Err)
+	}
+
+	if len(report.Regions) == 0 {
+		text := "❌ Не удалось получить статистику ни для одного региона"
+		if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
+			h.logger.Error("send empty region updates failed", "err", err)
+		}
+		return
+	}
+
+	date := h.now().Format("02.01.2006")
+	for _, info := range report.Regions {
+		if err := h.adapter.SendMessage(ctx, chatID, formatRegionUpdatesMessage(info, date)); err != nil {
+			h.logger.Error("send region updates failed", "region", info.Region, "err", err)
+		}
+	}
+
+	if len(report.Errors) > 0 {
+		failedRegions := make([]string, 0, len(report.Errors))
+		for _, regionErr := range report.Errors {
+			region := strings.TrimSpace(regionErr.Region)
+			if region == "" {
+				region = "unknown"
+			}
+			failedRegions = append(failedRegions, escapeHTML(region))
+		}
+		text := "⚠️ Не удалось получить данные по регионам: " + strings.Join(failedRegions, ", ")
+		if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
+			h.logger.Error("send partial region updates failed", "err", err)
+		}
+	}
 }
 
 func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
@@ -359,6 +446,35 @@ func (h *Handler) SendDefenseReminderWithKeyboard(ctx context.Context, chatID in
 }
 
 // --- Helpers ---
+
+// formatRegionUpdatesMessage renders one region's block, mirroring the Astana
+// reference format (dated header + metric lines). Metrics whose pinned event
+// failed verification are shown as unavailable instead of a stale number, so a
+// single bad event ID never masquerades as real data.
+func formatRegionUpdatesMessage(info domain.RegionUpdatesInfo, date string) string {
+	region := strings.TrimSpace(info.Region)
+	if region == "" {
+		region = "unknown"
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "### %s - %s\n", date, escapeHTML(region))
+	fmt.Fprintf(&sb, "- %d заявок\n", info.SignedUpWithoutOnboarding)
+	fmt.Fprintf(&sb, "- %d прошли игры\n", info.SucceededOnboardingGames)
+	writeRegionMetric(&sb, info, domain.EventCheckin, info.CheckinRegistrations, "reg на check-in")
+	writeRegionMetric(&sb, info, domain.EventPiscineGo, info.PiscineGoRegistrations, "reg на piscine")
+	return sb.String()
+}
+
+// writeRegionMetric writes a metric line, or an "unavailable" notice when the
+// metric's pinned event was flagged stale (missing / wrong region / ended).
+func writeRegionMetric(sb *strings.Builder, info domain.RegionUpdatesInfo, t domain.EventType, count int, label string) {
+	if info.IsStale(t) {
+		fmt.Fprintf(sb, "- ⚠️ %s: данные неактуальны (ивент недоступен или завершён)\n", label)
+		return
+	}
+	fmt.Fprintf(sb, "- %d %s\n", count, label)
+}
 
 func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, piscine domain.PiscineType) {
 	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {

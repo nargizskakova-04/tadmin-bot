@@ -1,0 +1,5 @@
+### {{DATE}} - Астана
+- {{TOTAL}} тотал заявок
+- {{SUCCEEDED}} тотал прошли игры
+- {{CHECKIN}} reg на check-in #15
+- {{PISCINEGO}} reg на piscine #15

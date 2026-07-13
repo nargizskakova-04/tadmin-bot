@@ -14,4 +14,7 @@ var (
 
 	// ErrGraphQL is returned when a GraphQL query fails.
 	ErrGraphQL = errors.New("graphql query error")
+
+	// ErrNoCampuses is returned when the platform has no campus objects to process.
+	ErrNoCampuses = errors.New("no campuses found")
 )

@@ -16,6 +16,8 @@ type RaidUseCase struct {
 	strategies map[domain.PiscineType]strategy.PiscineStrategy
 }
 
+
+
 // NewRaidUseCase constructs a RaidUseCase with the provided dependencies.
 func NewRaidUseCase(
 	eduClient domain.OneEduClient,

@@ -38,7 +38,17 @@ type Config struct {
 	// Pre-configured Google Sheets defense tables, indexed by piscine and week.
 	SheetIDs  map[domain.PiscineType]map[int]string
 	SheetURLs map[domain.PiscineType]map[int]string
+
+	// RegionEvents pins the authoritative 01-edu event IDs per region (campus),
+	// keyed by lowercased campus name. Populated from the built-in defaults
+	// overlaid with REGION_<NAME>_{CHECKIN,PISCINE,MODULE}_EVENT_ID env vars.
+	RegionEvents map[string]domain.RegionUpdateEventsConfig
 }
+
+// regionEventEnvRe matches REGION_<NAME>_<KIND>_EVENT_ID env vars. <NAME> is
+// greedy so region names may themselves contain underscores; the fixed suffix
+// disambiguates the kind.
+var regionEventEnvRe = regexp.MustCompile(`^REGION_(.+)_(CHECKIN|PISCINE|MODULE)_EVENT_ID$`)
 
 // spreadsheetIDRe extracts the spreadsheet ID from a Google Sheets URL.
 var spreadsheetIDRe = regexp.MustCompile(`spreadsheets/d/([a-zA-Z0-9_-]+)`)
@@ -105,6 +115,11 @@ func Load() (*Config, error) {
 
 	sheetIDs, sheetURLs := loadSheetMaps()
 
+	regionEvents, err := loadRegionEvents()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		TelegramToken:         token,
 		ChatIDs:               chatIDs,
@@ -116,7 +131,50 @@ func Load() (*Config, error) {
 		GoogleCredentialsFile: os.Getenv("GOOGLE_CREDENTIALS_FILE"),
 		SheetIDs:              sheetIDs,
 		SheetURLs:             sheetURLs,
+		RegionEvents:          regionEvents,
 	}, nil
+}
+
+// loadRegionEvents starts from the built-in per-region defaults and overlays any
+// REGION_<NAME>_{CHECKIN,PISCINE,MODULE}_EVENT_ID env vars, merging field by
+// field so an override for one metric leaves the region's other metrics on their
+// default. Region names are lowercased to match campus names from the platform.
+func loadRegionEvents() (map[string]domain.RegionUpdateEventsConfig, error) {
+	out := domain.DefaultRegionUpdateEvents()
+
+	for _, kv := range os.Environ() {
+		eq := strings.IndexByte(kv, '=')
+		if eq < 0 {
+			continue
+		}
+		key, raw := kv[:eq], strings.TrimSpace(kv[eq+1:])
+		m := regionEventEnvRe.FindStringSubmatch(key)
+		if m == nil || raw == "" {
+			continue
+		}
+
+		id, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: invalid event ID %q: %w", key, raw, err)
+		}
+		if id <= 0 {
+			return nil, fmt.Errorf("%s: event ID must be positive, got %d", key, id)
+		}
+
+		region := strings.ToLower(m[1])
+		cfg := out[region]
+		switch m[2] {
+		case "CHECKIN":
+			cfg.CheckinEventID = id
+		case "PISCINE":
+			cfg.PiscineEventID = id
+		case "MODULE":
+			cfg.ModuleEventID = id
+		}
+		out[region] = cfg
+	}
+
+	return out, nil
 }
 
 func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain.PiscineType]map[int]string) {
