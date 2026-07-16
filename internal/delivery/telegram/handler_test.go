@@ -1,12 +1,79 @@
 package telegram
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"admin-bot/internal/domain"
+	"admin-bot/internal/infra/accessstore"
+	"admin-bot/internal/usecase"
 )
+
+// TestIsAuthorized covers the private-chat / group / super-admin authorization
+// matrix. Telegram guarantees chatID == userID for private chats, so an
+// approved user is authorized in their DM with no per-chat allowlisting.
+func TestIsAuthorized(t *testing.T) {
+	const (
+		superAdmin  int64 = 999
+		approved    int64 = 100
+		pending     int64 = 200
+		rejected    int64 = 300
+		unknown     int64 = 400
+		allowedChat int64 = -100
+		otherChat   int64 = -500
+	)
+
+	store, err := accessstore.New(filepath.Join(t.TempDir(), "access.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	uc := usecase.NewAccessUseCase(store)
+	if _, err := uc.Approve(approved); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := uc.RequestAccess(pending, "", ""); err != nil {
+		t.Fatalf("request pending: %v", err)
+	}
+	if _, err := uc.RequestAccess(rejected, "", ""); err != nil {
+		t.Fatalf("request rejected: %v", err)
+	}
+	if _, err := uc.Reject(rejected); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+
+	h := &Handler{
+		accessUC:     uc,
+		superAdminID: superAdmin,
+		authorized:   map[int64]bool{allowedChat: true},
+	}
+
+	cases := []struct {
+		name           string
+		chatID, userID int64
+		want           bool
+	}{
+		{"super_admin_in_group", allowedChat, superAdmin, true},
+		{"super_admin_in_dm", superAdmin, superAdmin, true},
+		{"super_admin_in_random_group", otherChat, superAdmin, true},
+		{"approved_in_own_dm", approved, approved, true},
+		{"approved_in_allowed_group", allowedChat, approved, true},
+		{"approved_in_other_group", otherChat, approved, false},
+		{"pending_in_dm", pending, pending, false},
+		{"rejected_in_dm", rejected, rejected, false},
+		{"unknown_in_dm", unknown, unknown, false},
+		{"unknown_in_allowed_group", allowedChat, unknown, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := h.isAuthorized(tc.chatID, tc.userID); got != tc.want {
+				t.Errorf("isAuthorized(%d, %d) = %v, want %v", tc.chatID, tc.userID, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParsePiscineFromCallback(t *testing.T) {
 	cases := []struct {

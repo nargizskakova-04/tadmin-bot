@@ -84,6 +84,24 @@ func (a *Adapter) SendMessageWithKeyboard(ctx context.Context, chatID int64, tex
 	return nil
 }
 
+// EditMessageText replaces the text of an existing message and drops any inline
+// keyboard it carried (ReplyMarkup omitted). Used to turn the approve/reject
+// prompt into a settled "approved/rejected" line once the super-admin decides.
+func (a *Adapter) EditMessageText(ctx context.Context, chatID int64, messageID int, text string) error {
+	_, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Text:      text,
+		ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		err = a.scrub(err)
+		a.logger.Error("telegram edit failed", "chat_id", chatID, "message_id", messageID, "err", err)
+		return fmt.Errorf("edit message: %w", err)
+	}
+	return nil
+}
+
 // Start begins long-polling for updates.
 func (a *Adapter) Start(ctx context.Context) {
 	a.bot.Start(ctx)

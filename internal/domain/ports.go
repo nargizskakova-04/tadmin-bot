@@ -48,3 +48,15 @@ type Scheduler interface {
 	Start()
 	Stop()
 }
+
+// AccessStore persists access requests. Implementations must be safe for
+// concurrent use.
+type AccessStore interface {
+	// Get returns the stored request for a user and whether one exists.
+	Get(userID int64) (AccessRequest, bool)
+	// Save inserts or overwrites the request and durably persists the store.
+	Save(req AccessRequest) error
+	// ListPending returns every request with status pending, ordered by
+	// RequestedAt (oldest first).
+	ListPending() ([]AccessRequest, error)
+}

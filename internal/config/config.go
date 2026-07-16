@@ -22,6 +22,18 @@ type Config struct {
 	// only accepts commands from the same chats it broadcasts to.
 	AdminChatIDs []int64
 
+	// SuperAdminID is the single user (from SUPER_ADMIN_USER_ID) who receives
+	// access requests and presses the approve/reject buttons. Always authorized.
+	SuperAdminID int64
+
+	// AdminUserIDs is an optional pre-seed list (ADMIN_USER_IDS): on first start,
+	// when the access store is empty, these users are inserted as approved so an
+	// existing hand-configured allowlist keeps working.
+	AdminUserIDs []int64
+
+	// AccessStorePath is where the JSON access store lives (ACCESS_STORE_PATH).
+	AccessStorePath string
+
 	// 01-edu
 	OneEduBaseURL     string
 	OneEduAccessToken string
@@ -113,6 +125,22 @@ func Load() (*Config, error) {
 		adminIDs = chatIDs
 	}
 
+	// SUPER_ADMIN_USER_ID is required: it is the only user who can approve or
+	// reject access requests, so without it the request workflow is inert.
+	superAdminRaw, err := requireEnv("SUPER_ADMIN_USER_ID")
+	if err != nil {
+		return nil, err
+	}
+	superAdminID, err := strconv.ParseInt(strings.TrimSpace(superAdminRaw), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("SUPER_ADMIN_USER_ID: invalid user ID %q: %w", superAdminRaw, err)
+	}
+
+	adminUserIDs, err := parseChatIDs(os.Getenv("ADMIN_USER_IDS"))
+	if err != nil {
+		return nil, fmt.Errorf("ADMIN_USER_IDS: %w", err)
+	}
+
 	sheetIDs, sheetURLs := loadSheetMaps()
 
 	regionEvents, err := loadRegionEvents()
@@ -124,6 +152,9 @@ func Load() (*Config, error) {
 		TelegramToken:         token,
 		ChatIDs:               chatIDs,
 		AdminChatIDs:          adminIDs,
+		SuperAdminID:          superAdminID,
+		AdminUserIDs:          adminUserIDs,
+		AccessStorePath:       envOr("ACCESS_STORE_PATH", "data/access.json"),
 		OneEduBaseURL:         eduURL,
 		OneEduAccessToken:     eduToken,
 		TemplatesPath:         envOr("TEMPLATES_PATH", "messages"),

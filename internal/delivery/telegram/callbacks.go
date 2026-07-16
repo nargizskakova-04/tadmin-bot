@@ -22,8 +22,8 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 
-	if !h.isAuthorized(chatID) {
-		h.logger.Warn("unauthorized callback", "data", "defense_create", "chat_id", chatID)
+	if !h.isAuthorized(chatID, cb.From.ID) {
+		h.logger.Warn("unauthorized callback", "data", "defense_create", "chat_id", chatID, "user_id", cb.From.ID)
 		h.answer(ctx, b, cb.ID, "Недостаточно прав")
 		return
 	}
@@ -79,8 +79,8 @@ func (h *Handler) HandleCallbackEditParams(ctx context.Context, b *bot.Bot, upda
 		return
 	}
 
-	if !h.isAuthorized(chatID) {
-		h.logger.Warn("unauthorized callback", "data", "defense_edit", "chat_id", chatID)
+	if !h.isAuthorized(chatID, cb.From.ID) {
+		h.logger.Warn("unauthorized callback", "data", "defense_edit", "chat_id", chatID, "user_id", cb.From.ID)
 		h.answer(ctx, b, cb.ID, "Недостаточно прав")
 		return
 	}

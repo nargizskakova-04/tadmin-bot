@@ -30,6 +30,7 @@ func requiredEnvs() map[string]*string {
 		"ONEEDU_BASE_URL":         strp("https://learn.example.com"),
 		"PLATFORM_ACCESS_TOKEN":   strp("ptok"),
 		"CHAT_IDS":                strp("-100"), // now required
+		"SUPER_ADMIN_USER_ID":     strp("555"),  // now required
 		"TEMPLATES_PATH":          strp(""),
 		"TIMEZONE":                strp(""),
 		"GOOGLE_CREDENTIALS_FILE": strp(""),

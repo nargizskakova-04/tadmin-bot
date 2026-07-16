@@ -16,10 +16,10 @@ import (
 )
 
 func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
 		return
 	}
-	chatID := update.Message.Chat.ID
 
 	text := "📋 <b>Команды:</b>\n\n" +
 		"/help — показать это сообщение\n" +
@@ -49,10 +49,10 @@ func (h *Handler) HandleRaidAI(ctx context.Context, b *bot.Bot, update *models.U
 }
 
 func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
 		return
 	}
-	chatID := update.Message.Chat.ID
 
 	var sb strings.Builder
 	for _, p := range domain.AllPiscines() {
@@ -87,13 +87,10 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 
 // HandleTables handles the /create_tables command.
 func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
-		if update.Message != nil {
-			h.logger.Warn("unauthorized /create_tables", "chat_id", update.Message.Chat.ID)
-		}
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
 		return
 	}
-	chatID := update.Message.Chat.ID
 
 	if h.sheets == nil {
 		_ = h.adapter.SendMessage(ctx, chatID, msgSheetsNotConfigured)
@@ -154,10 +151,10 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 }
 
 func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
 		return
 	}
-	chatID := update.Message.Chat.ID
 
 	var sb strings.Builder
 
@@ -181,10 +178,10 @@ func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *m
 }
 
 func (h *Handler) HandleRegionUpdates(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
 		return
 	}
-	chatID := update.Message.Chat.ID
 
 	report, err := h.updatesUC.GetRegionUpdates(ctx)
 	if err != nil {
@@ -235,10 +232,10 @@ func (h *Handler) HandleRegionUpdates(ctx context.Context, b *bot.Bot, update *m
 }
 
 func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, piscine domain.PiscineType) {
-	if update.Message == nil || !h.isAuthorized(update.Message.Chat.ID) {
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
 		return
 	}
-	chatID := update.Message.Chat.ID
 
 	weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
 	if err != nil {
