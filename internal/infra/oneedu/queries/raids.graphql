@@ -130,3 +130,59 @@ query GetCurrentPiscineId($name: String!) {
     endAt
   }
 }
+
+query GetCurrentPiscinesId {
+  event(where: {
+    startAt: { _lte: "now()" }
+    endAt: { _gte: "now()" }
+    _and: [
+      { path: { _iregex: "astanahub" } }
+      { path: { _iregex: "piscine" } }
+    ]
+  }) {
+    id
+    startAt
+    endAt
+    path
+  }
+}
+
+query GetUpcomingPiscinesId($upcomingBefore: timestamptz!) {
+  event(where: {
+    startAt: { _gt: "now()", _lte: $upcomingBefore }
+    _and: [
+      { path: { _iregex: "astanahub" } }
+      { path: { _iregex: "piscine" } }
+    ]
+  }) {
+    id
+    startAt
+    endAt
+    path
+  }
+}
+
+query GetRaidsByParentId($id: Int!) {
+  event(where: {
+    object: { type: { _eq: "raid" } }
+    parent: { id: { _eq: $id } }
+  }) {
+    id
+    object { type, name }
+    parentId
+    groups {
+      captain {
+        login
+      }
+      group_status {
+        status
+      }
+      members {
+        id
+        userLogin
+      }
+    }
+    endAt
+    startAt
+  }
+}

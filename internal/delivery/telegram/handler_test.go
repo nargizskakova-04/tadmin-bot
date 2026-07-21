@@ -162,8 +162,10 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 		SignedUpWithoutOnboarding: 12,
 		SucceededOnboardingGames:  34,
 		CheckinRegistrations:      56,
-		PiscineGoRegistrations:    78,
-		CoreUsers:                 90,
+		PiscineRegistrations: []domain.PiscineRegistrationCount{
+			{Label: "ai-curriculum/prompt-piscine", Path: "/a<b/ai-curriculum/prompt-piscine", Count: 78},
+		},
+		CoreUsers: 90,
 	}, "02.07.2026")
 
 	wantParts := []string{
@@ -171,7 +173,7 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 		"- 12 заявок",
 		"- 34 прошли игры",
 		"- 56 reg на check-in",
-		"- 78 reg на piscine",
+		"- 78 reg на ai-curriculum/prompt-piscine",
 	}
 	for _, part := range wantParts {
 		if !strings.Contains(got, part) {
@@ -181,24 +183,40 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 }
 
 // TestFormatRegionUpdatesMessage_StaleEvent verifies a metric backed by a stale
-// pinned event is shown as unavailable rather than as a (misleading) count.
+// pinned event (check-in) is shown as unavailable rather than as a (misleading)
+// count.
 func TestFormatRegionUpdatesMessage_StaleEvent(t *testing.T) {
 	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
-		Region:                 "shymkent",
-		CheckinRegistrations:   56,
-		PiscineGoRegistrations: 78,
+		Region:               "shymkent",
+		CheckinRegistrations: 56,
 		StaleEvents: []domain.StaleEvent{
-			{Type: domain.EventPiscineGo, EventID: 222, Reason: "ended"},
+			{Type: domain.EventCheckin, EventID: 111, Reason: "ended"},
 		},
 	}, "02.07.2026")
 
-	if !strings.Contains(got, "- 56 reg на check-in") {
-		t.Errorf("check-in should still show its count:\n%s", got)
+	if strings.Contains(got, "56 reg на check-in") {
+		t.Errorf("stale check-in metric must not show its count:\n%s", got)
 	}
-	if strings.Contains(got, "78 reg на piscine") {
-		t.Errorf("stale piscine metric must not show its count:\n%s", got)
+	if !strings.Contains(got, "⚠️ reg на check-in") {
+		t.Errorf("stale check-in metric should be flagged unavailable:\n%s", got)
 	}
-	if !strings.Contains(got, "⚠️ reg на piscine") {
-		t.Errorf("stale piscine metric should be flagged unavailable:\n%s", got)
+}
+
+// TestFormatRegionUpdatesMessage_UpcomingPiscine verifies upcoming piscines are
+// annotated with their start date.
+func TestFormatRegionUpdatesMessage_UpcomingPiscine(t *testing.T) {
+	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region: "astanahub",
+		PiscineRegistrations: []domain.PiscineRegistrationCount{
+			{Label: "ai-curriculum/prompt-piscine", Count: 42},
+			{Label: "module/piscine-rust", Count: 17, Upcoming: true, StartAt: time.Date(2026, 7, 6, 5, 0, 0, 0, time.UTC)},
+		},
+	}, "02.07.2026")
+
+	if !strings.Contains(got, "- 42 reg на ai-curriculum/prompt-piscine\n") {
+		t.Errorf("current piscine line missing:\n%s", got)
+	}
+	if !strings.Contains(got, "- 17 reg на module/piscine-rust (скоро старт: 06.07)") {
+		t.Errorf("upcoming piscine line missing start annotation:\n%s", got)
 	}
 }

@@ -6,7 +6,21 @@ type AstanaUpdatesInfo struct {
 	Total     int
 	Succeeded int
 	Checkin   int
-	Piscinego int
+
+	// PiscineRegistrations holds registration counts for every currently active
+	// and upcoming piscine, discovered by path rather than a single hardcoded
+	// "piscinego" path.
+	PiscineRegistrations []PiscineRegistrationCount
+}
+
+// PiscineRegistrationCount is the number of registrations on a discovered
+// piscine, identified by its path (see PiscineEvent).
+type PiscineRegistrationCount struct {
+	Label    string    // PiscineEvent.Label(), e.g. "ai-curriculum/prompt-piscine"
+	Path     string    // full event path, e.g. "/astanahub/ai-curriculum/prompt-piscine"
+	Count    int       // registration_user_aggregate count for the path
+	Upcoming bool      // true when the piscine has not started yet
+	StartAt  time.Time // start of the (earliest) event for this path; used for upcoming
 }
 
 type RegionUpdatesInfo struct {
@@ -14,8 +28,11 @@ type RegionUpdatesInfo struct {
 	SignedUpWithoutOnboarding int
 	SucceededOnboardingGames  int
 	CheckinRegistrations      int
-	PiscineGoRegistrations    int
-	CoreUsers                 int
+	// PiscineRegistrations holds per-piscine registration counts for this
+	// region, discovered by path (current + upcoming) instead of a single
+	// hardcoded piscinego path.
+	PiscineRegistrations []PiscineRegistrationCount
+	CoreUsers            int
 
 	// StaleEvents lists pinned events (see RegionUpdateEventsConfig) that were
 	// resolved but failed verification — they do not exist, belong to another

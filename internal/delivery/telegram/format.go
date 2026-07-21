@@ -23,8 +23,26 @@ func formatRegionUpdatesMessage(info domain.RegionUpdatesInfo, date string) stri
 	fmt.Fprintf(&sb, "- %d заявок\n", info.SignedUpWithoutOnboarding)
 	fmt.Fprintf(&sb, "- %d прошли игры\n", info.SucceededOnboardingGames)
 	writeRegionMetric(&sb, info, domain.EventCheckin, info.CheckinRegistrations, "reg на check-in")
-	writeRegionMetric(&sb, info, domain.EventPiscineGo, info.PiscineGoRegistrations, "reg на piscine")
+	writePiscineRegistrations(&sb, info.PiscineRegistrations)
 	return sb.String()
+}
+
+// writePiscineRegistrations renders one line per discovered piscine (current
+// and upcoming), showing its module/curriculum path. Upcoming piscines are
+// annotated with their start date.
+func writePiscineRegistrations(sb *strings.Builder, regs []domain.PiscineRegistrationCount) {
+	for _, r := range regs {
+		label := r.Label
+		if label == "" {
+			label = r.Path
+		}
+		if r.Upcoming {
+			fmt.Fprintf(sb, "- %d reg на %s (скоро старт: %s)\n",
+				r.Count, escapeHTML(label), r.StartAt.Format("02.01"))
+			continue
+		}
+		fmt.Fprintf(sb, "- %d reg на %s\n", r.Count, escapeHTML(label))
+	}
 }
 
 // writeRegionMetric writes a metric line, or an "unavailable" notice when the

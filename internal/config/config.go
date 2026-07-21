@@ -76,8 +76,10 @@ var sheetEnvMap = []struct {
 	{"SHEET_JS_WEEK1", domain.PiscineJS, 1},
 	{"SHEET_JS_WEEK2", domain.PiscineJS, 2},
 	{"SHEET_JS_WEEK3", domain.PiscineJS, 3},
-	{"SHEET_AI_WEEK1", domain.PiscineAI, 1},
-	{"SHEET_AI_WEEK2", domain.PiscineAI, 2},
+	// AI sheets are wired to the first AI stream; the other streams and Rust have
+	// no configured sheets yet.
+	{"SHEET_AI_WEEK1", domain.PiscineAI_1, 1},
+	{"SHEET_AI_WEEK2", domain.PiscineAI_1, 2},
 }
 
 // Load reads configuration from the environment.

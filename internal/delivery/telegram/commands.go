@@ -25,7 +25,10 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/help — показать это сообщение\n" +
 		"/raidgo — информация о рейде Piscine Go\n" +
 		"/raidjs — информация о рейде Piscine JS\n" +
-		"/raidai — информация о рейде Piscine AI\n" +
+		"/raidai1 — информация о рейде Piscine AI 1\n" +
+		"/raidai2 — информация о рейде Piscine AI 2\n" +
+		"/raidai3 — информация о рейде Piscine AI 3\n" +
+		"/raidrust — информация о рейде Piscine RUST\n" +
 		"/week — текущая неделя для всех Piscine\n" +
 		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов\n" +
 		"/get_region_updates — статистика обновлений по всем регионам\n" +
@@ -44,8 +47,20 @@ func (h *Handler) HandleRaidJS(ctx context.Context, b *bot.Bot, update *models.U
 	h.handleRaidInfo(ctx, update, domain.PiscineJS)
 }
 
-func (h *Handler) HandleRaidAI(ctx context.Context, b *bot.Bot, update *models.Update) {
-	h.handleRaidInfo(ctx, update, domain.PiscineAI)
+func (h *Handler) HandleRaidAI1(ctx context.Context, b *bot.Bot, update *models.Update) {
+	h.handleRaidInfo(ctx, update, domain.PiscineAI_1)
+}
+
+func (h *Handler) HandleRaidAI2(ctx context.Context, b *bot.Bot, update *models.Update) {
+	h.handleRaidInfo(ctx, update, domain.PiscineAI_2)
+}
+
+func (h *Handler) HandleRaidAI3(ctx context.Context, b *bot.Bot, update *models.Update) {
+	h.handleRaidInfo(ctx, update, domain.PiscineAI_3)
+}
+
+func (h *Handler) HandleRaidRust(ctx context.Context, b *bot.Bot, update *models.Update) {
+	h.handleRaidInfo(ctx, update, domain.PiscineRUST)
 }
 
 func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -54,30 +69,43 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 
-	var sb strings.Builder
-	for _, p := range domain.AllPiscines() {
-		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, p)
+	piscines, err := h.raidUC.GetCurrentPiscines(ctx)
+	if err != nil || len(piscines) == 0 {
+		// Do NOT echo err.Error() into the chat: an upstream error can carry
+		// sensitive fragments, and chat messages persist on Telegram's servers.
+		// Log the detail server-side, show a generic line here.
 		if err != nil {
-			// Do NOT echo err.Error() into the chat: an upstream error can carry
-			// sensitive fragments, and chat messages persist on Telegram's
-			// servers. Log the detail server-side, show a generic line here.
-			h.logger.Error("detect week failed", "piscine", p, "err", err)
-			fmt.Fprintf(&sb, "❌ %s: не удалось получить данные\n", escapeHTML(string(p)))
+			h.logger.Error("get current piscines failed", "err", err)
+		} else {
+			h.logger.Warn("get current piscines returned empty")
+		}
+		if sendErr := h.adapter.SendMessage(ctx, chatID, "❌ Не удалось получить список текущих бассейнов"); sendErr != nil {
+			h.logger.Error("send week info failed", "err", sendErr)
+		}
+		return
+	}
+
+	var sb strings.Builder
+	for _, p := range piscines {
+		label := p.Label()
+		if label == "" {
+			label = p.Path
+		}
+
+		weekInfo, err := h.raidUC.DetectCurrentWeekForEvent(ctx, p)
+		if err != nil {
+			h.logger.Error("detect week for event failed", "path", p.Path, "eventID", p.ID, "err", err)
+			fmt.Fprintf(&sb, "📌 <b>%s</b> (id %d): не удалось получить данные\n", escapeHTML(label), p.ID)
 			continue
 		}
 
 		raidName := "—"
-		if weekInfo.ActiveRaid != nil {
+		if weekInfo.ActiveRaid != nil && weekInfo.ActiveRaid.RaidName != "" {
 			raidName = weekInfo.ActiveRaid.RaidName
 		}
 
-		weekLabel := fmt.Sprintf("Неделя %d", weekInfo.WeekNumber)
-		if domain.IsFinalWeek(p, weekInfo.WeekNumber) {
-			weekLabel += " (Final Exam)"
-		}
-
-		fmt.Fprintf(&sb, "📌 <b>%s</b>: %s | Рейд: %s\n",
-			escapeHTML(string(p)), weekLabel, escapeHTML(raidName))
+		fmt.Fprintf(&sb, "📌 <b>%s</b> (id %d): Неделя %d | Рейд: %s\n",
+			escapeHTML(label), p.ID, weekInfo.WeekNumber, escapeHTML(raidName))
 	}
 
 	if err := h.adapter.SendMessage(ctx, chatID, sb.String()); err != nil {
@@ -169,7 +197,7 @@ func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *m
 		fmt.Fprintf(&sb, "- %d тотал заявок\n", info.Total)
 		fmt.Fprintf(&sb, "- %d тотал прошли игры\n", info.Succeeded)
 		fmt.Fprintf(&sb, "- %d reg на check-in\n", info.Checkin)
-		fmt.Fprintf(&sb, "- %d reg на piscine\n", info.Piscinego)
+		writePiscineRegistrations(&sb, info.PiscineRegistrations)
 	}
 
 	if err := h.adapter.SendMessage(ctx, chatID, sb.String()); err != nil {

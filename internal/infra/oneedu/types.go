@@ -17,6 +17,27 @@ type piscineEventNode struct {
 	EndAt   time.Time `json:"endAt"`
 }
 
+// piscinesResponse is the response for GetCurrentPiscinesId / GetUpcomingPiscinesId.
+type piscinesResponse struct {
+	Data struct {
+		Event []piscineListEventNode `json:"event"`
+	} `json:"data"`
+}
+
+type piscineListEventNode struct {
+	ID      int       `json:"id"`
+	StartAt time.Time `json:"startAt"`
+	EndAt   time.Time `json:"endAt"`
+	Path    string    `json:"path"`
+}
+
+// registrationCountResponse is the response for GetRegistrationCountByPath.
+type registrationCountResponse struct {
+	Data struct {
+		Registrations aggregateCountNode `json:"registrations"`
+	} `json:"data"`
+}
+
 // raidsResponse is the response for GetRaidsByPiscine*Id and GetRaidByName.
 type raidsResponse struct {
 	Data struct {
@@ -71,7 +92,6 @@ type astanaUpdatesNode struct {
 	TotalAstana     aggregateCountNode `json:"total_astana"`
 	SucceededAstana aggregateCountNode `json:"succeeded_astana"`
 	CheckinAstana   aggregateCountNode `json:"checkin_astana"`
-	PiscinegoAstana aggregateCountNode `json:"piscinego_astana"`
 }
 
 // eventByIDResponse is the response for GetEventByID.
@@ -109,7 +129,6 @@ type regionUpdatesNode struct {
 	SignedUpNoOnboarding strictAggregateCountNode `json:"signed_up_no_onboarding"`
 	Succeeded            strictAggregateCountNode `json:"succeeded"`
 	Checkin              strictAggregateCountNode `json:"checkin"`
-	Piscinego            strictAggregateCountNode `json:"piscinego"`
 	Core                 strictAggregateCountNode `json:"core"`
 }
 

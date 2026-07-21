@@ -48,6 +48,73 @@ func (c *Client) GetRaidsByPiscineID(ctx context.Context, piscine domain.Piscine
 	return raids, nil
 }
 
+// GetCurrentPiscines fetches every currently active piscine event via
+// path-based discovery (no name filter).
+func (c *Client) GetCurrentPiscines(ctx context.Context) ([]domain.PiscineEvent, error) {
+	return c.listPiscines(ctx, "GetCurrentPiscinesId", map[string]interface{}{})
+}
+
+// GetUpcomingPiscines fetches piscine events that start within the next month.
+// The upper bound keeps updates focused on what opens soon rather than every
+// far-future event.
+func (c *Client) GetUpcomingPiscines(ctx context.Context) ([]domain.PiscineEvent, error) {
+	upcomingBefore := time.Now().AddDate(0, 1, 0)
+	vars := map[string]interface{}{"upcomingBefore": upcomingBefore.Format(time.RFC3339)}
+	return c.listPiscines(ctx, "GetUpcomingPiscinesId", vars)
+}
+
+// listPiscines runs a path-based piscine-discovery query and maps the result.
+func (c *Client) listPiscines(ctx context.Context, opName string, vars map[string]interface{}) ([]domain.PiscineEvent, error) {
+	var resp piscinesResponse
+	if err := c.runQuery(ctx, opName, vars, &resp); err != nil {
+		return nil, err
+	}
+
+	events := make([]domain.PiscineEvent, 0, len(resp.Data.Event))
+	for _, ev := range resp.Data.Event {
+		events = append(events, domain.PiscineEvent{
+			ID:      ev.ID,
+			Path:    ev.Path,
+			StartAt: ev.StartAt,
+			EndAt:   ev.EndAt,
+		})
+	}
+	return events, nil
+}
+
+// GetRaidsByParentID fetches all raid child-events of a given event ID without
+// filtering by raid name. Week numbers are left at 0 here — callers assign them
+// from the raid ordering (see usecase.DetectCurrentWeekForEvent).
+func (c *Client) GetRaidsByParentID(ctx context.Context, parentEventID int) ([]domain.RaidInfo, error) {
+	vars := map[string]interface{}{"id": parentEventID}
+
+	var resp raidsResponse
+	if err := c.runQuery(ctx, "GetRaidsByParentId", vars, &resp); err != nil {
+		return nil, err
+	}
+
+	raids := make([]domain.RaidInfo, 0, len(resp.Data.Event))
+	for _, ev := range resp.Data.Event {
+		raids = append(raids, mapEventToRaidInfo("", ev))
+	}
+	return raids, nil
+}
+
+// GetRegistrationCountByPath counts user registrations on an arbitrary event
+// path whose registration ends after endDate.
+func (c *Client) GetRegistrationCountByPath(ctx context.Context, path string, endDate time.Time) (int, error) {
+	vars := map[string]interface{}{
+		"path":    path,
+		"endDate": endDate.Format(time.RFC3339),
+	}
+
+	var resp registrationCountResponse
+	if err := c.runQuery(ctx, "GetRegistrationCountByPath", vars, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Data.Registrations.Aggregate.Count, nil
+}
+
 // GetRaidByName fetches a specific raid event by name.
 func (c *Client) GetRaidByName(ctx context.Context, name string, startAt string) (*domain.RaidInfo, error) {
 	vars := map[string]interface{}{"name": name, "startAt": startAt}
@@ -81,7 +148,6 @@ func (c *Client) GetAstanaUpdates(ctx context.Context) (*domain.AstanaUpdatesInf
 		Total:     resp.Data.TotalAstana.Aggregate.Count,
 		Succeeded: resp.Data.SucceededAstana.Aggregate.Count,
 		Checkin:   resp.Data.CheckinAstana.Aggregate.Count,
-		Piscinego: resp.Data.PiscinegoAstana.Aggregate.Count,
 	}
 	return &info, nil
 }
@@ -192,7 +258,6 @@ func (c *Client) resolvePinnedEvents(
 		varKey string
 	}{
 		{domain.EventCheckin, events.CheckinEventID, "checkinPath"},
-		{domain.EventPiscineGo, events.PiscineEventID, "piscinegoPath"},
 		{domain.EventModule, events.ModuleEventID, "corePath"},
 	}
 
@@ -251,14 +316,13 @@ func classifyPinnedEvent(campus string, meta *domain.EventMeta, now time.Time) p
 func buildRegionStatsVariables(region string, startDate, endDate time.Time) map[string]interface{} {
 	region = strings.TrimSpace(region)
 	return map[string]interface{}{
-		"campus":        region,
-		"startDate":     startDate.Format(time.RFC3339),
-		"endDate":       endDate.Format(time.RFC3339),
-		"adminRole":     "campus_admin_" + region,
-		"gamesPath":     "/" + region + "/onboarding/games",
-		"checkinPath":   "/" + region + "/onboarding/checkin",
-		"piscinegoPath": "/" + region + "/piscinego",
-		"corePath":      "/" + region + "/module",
+		"campus":      region,
+		"startDate":   startDate.Format(time.RFC3339),
+		"endDate":     endDate.Format(time.RFC3339),
+		"adminRole":   "campus_admin_" + region,
+		"gamesPath":   "/" + region + "/onboarding/games",
+		"checkinPath": "/" + region + "/onboarding/checkin",
+		"corePath":    "/" + region + "/module",
 	}
 }
 
@@ -275,10 +339,6 @@ func mapRegionUpdates(region string, data regionUpdatesNode) (*domain.RegionUpda
 	if err != nil {
 		return nil, err
 	}
-	piscinego, err := strictCount(data.Piscinego, "piscinego")
-	if err != nil {
-		return nil, err
-	}
 	core, err := strictCount(data.Core, "core")
 	if err != nil {
 		return nil, err
@@ -289,7 +349,6 @@ func mapRegionUpdates(region string, data regionUpdatesNode) (*domain.RegionUpda
 		SignedUpWithoutOnboarding: signedUp,
 		SucceededOnboardingGames:  succeeded,
 		CheckinRegistrations:      checkin,
-		PiscineGoRegistrations:    piscinego,
 		CoreUsers:                 core,
 	}, nil
 }

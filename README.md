@@ -112,8 +112,13 @@ go run cmd/bot/main.go
 | `/week` | Текущая неделя для всех Piscine |
 | `/raidgo` | Информация о рейде Piscine Go |
 | `/raidjs` | Информация о рейде Piscine JS |
-| `/raidai` | Информация о рейде Piscine AI |
+| `/raidai1` | Информация о рейде Piscine AI 1 |
+| `/raidai2` | Информация о рейде Piscine AI 2 |
+| `/raidai3` | Информация о рейде Piscine AI 3 |
+| `/raidrust` | Информация о рейде Piscine RUST |
 | `/create_tables` | Создать Google Sheets таблицы для всех активных рейдов |
+| `/get_astana_updates` | Статистика обновлений Astana |
+| `/get_region_updates` | Статистика по регионам (кроме Astana) |
 
 ## Как работает определение недели
 
@@ -125,12 +130,16 @@ go run cmd/bot/main.go
 
 По имени рейда определяется номер недели через маппинг в `domain.RaidWeekMap`:
 
-| Piscine Go | Piscine JS | Piscine AI |
+| Piscine Go | Piscine JS | Piscine AI 1/2/3 |
 |---|---|---|
 | quad → неделя 1 | crossword → неделя 1 | backtesting-sp500 → неделя 1 |
 | sudoku → неделя 2 | sortable → неделя 2 | forest-prediction → неделя 2 |
-| quadchecker → неделя 3 | clonernews → неделя 3 | (нет) → неделя 3 = Final |
+| quadchecker → неделя 3 | clonernews → неделя 3 | |
 | (нет) → неделя 4 = Final | (нет) → неделя 4 = Final | |
+
+Три потока Piscine AI используют одинаковую карту рейдов (одна программа, разные `parent.id`).
+Piscine RUST не имеет захардкоженных имён рейдов: рейды берутся generic-запросом
+`GetRaidsByParentId`, а номер недели вычисляется по порядку рейдов (`startAt` по возрастанию).
 
 ## Расчёт таблицы защит
 

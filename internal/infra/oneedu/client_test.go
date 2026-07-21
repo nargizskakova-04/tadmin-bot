@@ -116,14 +116,13 @@ func TestBuildRegionStatsVariables(t *testing.T) {
 	got := buildRegionStatsVariables("shymkent", start, end)
 
 	want := map[string]interface{}{
-		"campus":        "shymkent",
-		"startDate":     "2025-06-25T00:00:00+06:00",
-		"endDate":       "2026-06-30T23:59:59+06:00",
-		"adminRole":     "campus_admin_shymkent",
-		"gamesPath":     "/shymkent/onboarding/games",
-		"checkinPath":   "/shymkent/onboarding/checkin",
-		"piscinegoPath": "/shymkent/piscinego",
-		"corePath":      "/shymkent/module",
+		"campus":      "shymkent",
+		"startDate":   "2025-06-25T00:00:00+06:00",
+		"endDate":     "2026-06-30T23:59:59+06:00",
+		"adminRole":   "campus_admin_shymkent",
+		"gamesPath":   "/shymkent/onboarding/games",
+		"checkinPath": "/shymkent/onboarding/checkin",
+		"corePath":    "/shymkent/module",
 	}
 
 	for key, wantValue := range want {
@@ -202,7 +201,6 @@ func TestMapRegionUpdates_MissingAggregate(t *testing.T) {
 		SignedUpNoOnboarding: strictAggregateCountNode{Aggregate: &countNode{Count: 1}},
 		Succeeded:            strictAggregateCountNode{Aggregate: &countNode{Count: 2}},
 		Checkin:              strictAggregateCountNode{Aggregate: &countNode{Count: 3}},
-		Piscinego:            strictAggregateCountNode{Aggregate: &countNode{Count: 4}},
 	}
 
 	if _, err := mapRegionUpdates("shymkent", data); err == nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"admin-bot/internal/config"
+	"admin-bot/internal/domain"
 	"admin-bot/internal/infra/accessstore"
 	"admin-bot/internal/infra/oneedu"
 	"admin-bot/internal/infra/scheduler"
@@ -81,7 +82,10 @@ func main() {
 	strategies := []strategy.PiscineStrategy{
 		strategy.NewGoStrategy(),
 		strategy.NewJSStrategy(),
-		strategy.NewAIStrategy(),
+		strategy.NewAIStrategy(domain.PiscineAI_1),
+		strategy.NewAIStrategy(domain.PiscineAI_2),
+		strategy.NewAIStrategy(domain.PiscineAI_3),
+		strategy.NewRustStrategy(),
 	}
 
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
