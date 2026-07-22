@@ -129,6 +129,16 @@ func (u *UpdatesUseCase) piscineRegistrations(
 	return counts
 }
 
+// GetEventInfo returns the detailed view of a single event by ID, or nil when
+// no event with that ID exists. It delegates to the 01-edu client.
+func (u *UpdatesUseCase) GetEventInfo(ctx context.Context, id int) (*domain.EventInfo, error) {
+	info, err := u.eduClient.GetEventInfo(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get event info %d: %w", id, err)
+	}
+	return info, nil
+}
+
 func (u *UpdatesUseCase) GetRegionUpdates(ctx context.Context) (domain.RegionUpdatesReport, error) {
 	campuses, err := u.eduClient.GetCampuses(ctx)
 	if err != nil {

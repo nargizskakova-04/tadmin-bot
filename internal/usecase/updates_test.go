@@ -17,6 +17,7 @@ type fakeUpdatesClient struct {
 	statsCalls  []string
 	eventsSeen  map[string]domain.RegionUpdateEventsConfig
 	events      map[int]*domain.EventMeta
+	eventInfos  map[int]*domain.EventInfo
 
 	current     []domain.PiscineEvent
 	upcoming    []domain.PiscineEvent
@@ -70,6 +71,10 @@ func (f *fakeUpdatesClient) GetCampuses(ctx context.Context) ([]string, error) {
 
 func (f *fakeUpdatesClient) GetEventByID(ctx context.Context, id int) (*domain.EventMeta, error) {
 	return f.events[id], nil
+}
+
+func (f *fakeUpdatesClient) GetEventInfo(ctx context.Context, id int) (*domain.EventInfo, error) {
+	return f.eventInfos[id], nil
 }
 
 func (f *fakeUpdatesClient) GetRegionUpdates(ctx context.Context, campus string, events domain.RegionUpdateEventsConfig) (*domain.RegionUpdatesInfo, error) {

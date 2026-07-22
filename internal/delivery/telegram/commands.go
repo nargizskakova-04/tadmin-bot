@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,8 +32,10 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidrust — информация о рейде Piscine RUST\n" +
 		"/week — текущая неделя для всех Piscine\n" +
 		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов\n" +
+		"/edit_tables — создать/обновить таблицу защиты с ручными параметрами\n" +
 		"/get_region_updates — статистика обновлений по всем регионам\n" +
-		"/get_astana_updates — статистика обновлений Astana\n"
+		"/get_astana_updates — статистика обновлений Astana\n" +
+		"/get_event {id} — информация об ивенте (участники, регистрация, даты)\n"
 
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send help failed", "err", err)
@@ -147,10 +150,14 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 
 		raid := weekInfo.ActiveRaid
 
-		spreadsheetID := h.lookupSheetID(piscine, weekInfo.WeekNumber)
+		spreadsheetID, dedicated := h.resolveSpreadsheetID(piscine, weekInfo.WeekNumber)
 		if spreadsheetID == "" {
-			h.logger.Warn("no sheet configured for week", "piscine", piscine, "week", weekInfo.WeekNumber)
-			lines = append(lines, fmt.Sprintf("⚠️ %s — таблица для недели %d не настроена", piscine, weekInfo.WeekNumber))
+			h.logger.Warn("no sheet configured", "piscine", piscine, "week", weekInfo.WeekNumber, "dedicated", dedicated)
+			if dedicated {
+				lines = append(lines, fmt.Sprintf("⚠️ %s — таблица для недели %d не настроена", piscine, weekInfo.WeekNumber))
+			} else {
+				lines = append(lines, fmt.Sprintf("⚠️ %s — универсальная таблица (SHEET_UNIVERSAL) не настроена", piscine))
+			}
 			continue
 		}
 
@@ -259,6 +266,54 @@ func (h *Handler) HandleRegionUpdates(ctx context.Context, b *bot.Bot, update *m
 	}
 }
 
+// HandleGetEvent handles "/get_event {id}" — it fetches and reports the event
+// window, registration window(s) and participant count for a single event ID.
+func (h *Handler) HandleGetEvent(ctx context.Context, b *bot.Bot, update *models.Update) {
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
+		return
+	}
+
+	id, ok := parseEventID(update.Message.Text)
+	if !ok {
+		_ = h.adapter.SendMessage(ctx, chatID,
+			"ℹ️ Использование: <code>/get_event {id}</code>\nНапример: <code>/get_event 12345</code>")
+		return
+	}
+
+	info, err := h.updatesUC.GetEventInfo(ctx, id)
+	if err != nil {
+		// Never echo err.Error() into chat (it can carry sensitive fragments);
+		// log server-side and show a generic message.
+		h.logger.Error("get event info failed", "id", id, "err", err)
+		_ = h.adapter.SendMessage(ctx, chatID, "❌ Не удалось получить информацию об ивенте")
+		return
+	}
+	if info == nil {
+		_ = h.adapter.SendMessage(ctx, chatID, fmt.Sprintf("⚠️ Ивент с ID %d не найден", id))
+		return
+	}
+
+	if err := h.adapter.SendMessage(ctx, chatID, formatEventInfoMessage(*info, h.loc)); err != nil {
+		h.logger.Error("send event info failed", "err", err)
+	}
+}
+
+// parseEventID extracts a positive integer event ID from a "/get_event {id}"
+// message. It tolerates a "@botname" suffix on the command and extra spaces,
+// and returns false when no valid ID is present.
+func parseEventID(text string) (int, bool) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		return 0, false
+	}
+	id, err := strconv.Atoi(fields[1])
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}
+
 func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, piscine domain.PiscineType) {
 	chatID, ok := h.guard(ctx, update)
 	if !ok {
@@ -299,7 +354,7 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 }
 
 func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
-	schedule := usecase.CalculateDefenseSchedule(raid.TeamsCount)
+	schedule := usecase.CalculateDefenseSchedule(usecase.DefaultScheduleParams(raid.TeamsCount))
 	return h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
 		RaidName:    raid.RaidName,
 		DefenseDate: defenseDate,

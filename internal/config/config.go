@@ -51,6 +51,12 @@ type Config struct {
 	SheetIDs  map[domain.PiscineType]map[int]string
 	SheetURLs map[domain.PiscineType]map[int]string
 
+	// UniversalSheetID/URL is the shared fallback defense table (SHEET_UNIVERSAL)
+	// used for piscines without a dedicated sheet: Piscine RUST and any
+	// dynamically discovered ("other") pool.
+	UniversalSheetID  string
+	UniversalSheetURL string
+
 	// RegionEvents pins the authoritative 01-edu event IDs per region (campus),
 	// keyed by lowercased campus name. Populated from the built-in defaults
 	// overlaid with REGION_<NAME>_{CHECKIN,PISCINE,MODULE}_EVENT_ID env vars.
@@ -76,10 +82,21 @@ var sheetEnvMap = []struct {
 	{"SHEET_JS_WEEK1", domain.PiscineJS, 1},
 	{"SHEET_JS_WEEK2", domain.PiscineJS, 2},
 	{"SHEET_JS_WEEK3", domain.PiscineJS, 3},
-	// AI sheets are wired to the first AI stream; the other streams and Rust have
-	// no configured sheets yet.
-	{"SHEET_AI_WEEK1", domain.PiscineAI_1, 1},
-	{"SHEET_AI_WEEK2", domain.PiscineAI_1, 2},
+	// The three parallel AI streams each get their own defense tables, one per
+	// week (domain.TotalWeeks for AI == 4). Variable names are consumed by
+	// external scripts and .env, so the SHEET_AI<n>_WEEK<w> format is fixed.
+	{"SHEET_AI1_WEEK1", domain.PiscineAI_1, 1},
+	{"SHEET_AI1_WEEK2", domain.PiscineAI_1, 2},
+	{"SHEET_AI1_WEEK3", domain.PiscineAI_1, 3},
+	{"SHEET_AI1_WEEK4", domain.PiscineAI_1, 4},
+	{"SHEET_AI2_WEEK1", domain.PiscineAI_2, 1},
+	{"SHEET_AI2_WEEK2", domain.PiscineAI_2, 2},
+	{"SHEET_AI2_WEEK3", domain.PiscineAI_2, 3},
+	{"SHEET_AI2_WEEK4", domain.PiscineAI_2, 4},
+	{"SHEET_AI3_WEEK1", domain.PiscineAI_3, 1},
+	{"SHEET_AI3_WEEK2", domain.PiscineAI_3, 2},
+	{"SHEET_AI3_WEEK3", domain.PiscineAI_3, 3},
+	{"SHEET_AI3_WEEK4", domain.PiscineAI_3, 4},
 }
 
 // Load reads configuration from the environment.
@@ -144,6 +161,8 @@ func Load() (*Config, error) {
 	}
 
 	sheetIDs, sheetURLs := loadSheetMaps()
+	universalURL := strings.TrimSpace(os.Getenv("SHEET_UNIVERSAL"))
+	universalID := parseSpreadsheetID(universalURL)
 
 	regionEvents, err := loadRegionEvents()
 	if err != nil {
@@ -164,6 +183,8 @@ func Load() (*Config, error) {
 		GoogleCredentialsFile: os.Getenv("GOOGLE_CREDENTIALS_FILE"),
 		SheetIDs:              sheetIDs,
 		SheetURLs:             sheetURLs,
+		UniversalSheetID:      universalID,
+		UniversalSheetURL:     universalURL,
 		RegionEvents:          regionEvents,
 	}, nil
 }
@@ -216,14 +237,10 @@ func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain
 
 	for _, e := range sheetEnvMap {
 		raw := strings.TrimSpace(os.Getenv(e.env))
-		if raw == "" {
+		spreadsheetID := parseSpreadsheetID(raw)
+		if spreadsheetID == "" {
 			continue
 		}
-		m := spreadsheetIDRe.FindStringSubmatch(raw)
-		if len(m) < 2 || m[1] == "" {
-			continue
-		}
-		spreadsheetID := m[1]
 
 		if _, ok := ids[e.piscine]; !ok {
 			ids[e.piscine] = make(map[int]string)
@@ -235,6 +252,19 @@ func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain
 		urls[e.piscine][e.week] = raw
 	}
 	return ids, urls
+}
+
+// parseSpreadsheetID extracts the spreadsheet ID from a full Google Sheets edit
+// URL. Returns "" when raw is empty or not a recognizable sheets URL.
+func parseSpreadsheetID(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	m := spreadsheetIDRe.FindStringSubmatch(raw)
+	if len(m) < 2 || m[1] == "" {
+		return ""
+	}
+	return m[1]
 }
 
 func requireEnv(name string) (string, error) {

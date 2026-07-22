@@ -58,12 +58,7 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 		return nil, fmt.Errorf("get raids: %w", err)
 	}
 
-	// Piscines without a hardcoded raid-name map (e.g. Rust, fetched via the
-	// generic parent-ID query) have no week numbers yet — assign them by raid
-	// order, same as the event-based detection.
-	if len(domain.RaidWeekMap[piscine]) == 0 {
-		assignOrdinalWeeks(raids)
-	}
+	assignWeekNumbers(piscine, raids)
 
 	now := time.Now()
 
@@ -158,6 +153,50 @@ func (uc *RaidUseCase) DetectCurrentWeekForEvent(ctx context.Context, event doma
 	// Shouldn't happen (not active, not all ended, none upcoming), but fall back
 	// to week 1 rather than erroring on a discovered piscine.
 	return &EventWeekInfo{Event: event, WeekNumber: 1, ActiveRaid: nil, HasRaids: true}, nil
+}
+
+// ListRaidsWithWeeks returns every raid of a named piscine's current active
+// instance, each annotated with its week number. Used by the /edit_tables
+// dialog to offer a raid/week picker. Week numbering follows the same rule as
+// DetectCurrentWeek (see assignWeekNumbers).
+func (uc *RaidUseCase) ListRaidsWithWeeks(ctx context.Context, piscine domain.PiscineType) ([]domain.RaidInfo, error) {
+	piscineInfo, err := uc.eduClient.GetCurrentPiscineID(ctx, piscine)
+	if err != nil {
+		return nil, fmt.Errorf("get piscine ID: %w", err)
+	}
+	if piscineInfo == nil {
+		return nil, fmt.Errorf("no active piscine found for %s", piscine)
+	}
+
+	raids, err := uc.eduClient.GetRaidsByPiscineID(ctx, piscine, piscineInfo.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get raids: %w", err)
+	}
+
+	assignWeekNumbers(piscine, raids)
+	return raids, nil
+}
+
+// ListRaidsForEvent returns every raid of a dynamically discovered piscine
+// event, numbered ordinally by start date (the event has no raid-name map).
+func (uc *RaidUseCase) ListRaidsForEvent(ctx context.Context, eventID int) ([]domain.RaidInfo, error) {
+	raids, err := uc.eduClient.GetRaidsByParentID(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("get raids for event %d: %w", eventID, err)
+	}
+	assignOrdinalWeeks(raids)
+	return raids, nil
+}
+
+// assignWeekNumbers fills in raid week numbers for a named piscine. Piscines
+// with a hardcoded raid-name→week map (Go/JS/AI) already have their weeks set by
+// the edu client during mapping; those without one (e.g. Rust, fetched via the
+// generic parent-ID query) are numbered by raid order here. Centralizing this
+// rule keeps DetectCurrentWeek and ListRaidsWithWeeks in agreement.
+func assignWeekNumbers(piscine domain.PiscineType, raids []domain.RaidInfo) {
+	if len(domain.RaidWeekMap[piscine]) == 0 {
+		assignOrdinalWeeks(raids)
+	}
 }
 
 // assignOrdinalWeeks sorts raids by start date and numbers them 1..N. Used for
@@ -275,7 +314,7 @@ func (uc *RaidUseCase) BuildDefenseReminder(
 	}
 
 	raid := weekInfo.ActiveRaid
-	schedule := CalculateDefenseSchedule(raid.TeamsCount)
+	schedule := CalculateDefenseSchedule(DefaultScheduleParams(raid.TeamsCount))
 
 	strat, ok := uc.strategies[piscine]
 	if !ok {

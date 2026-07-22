@@ -82,6 +82,24 @@ query GetEventByID($id: Int!) {
   }
 }
 
+query GetEventInfo($id: Int!) {
+  event(where: { id: { _eq: $id } }) {
+    id
+    startAt
+    endAt
+    path
+    registrations {
+      startAt
+      endAt
+      users_aggregate {
+        aggregate {
+          count
+        }
+      }
+    }
+  }
+}
+
 query region_stats(
   $campus: String!
   $startDate: timestamptz!

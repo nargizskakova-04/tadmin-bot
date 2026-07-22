@@ -202,6 +202,38 @@ func (c *Client) GetEventByID(ctx context.Context, id int) (*domain.EventMeta, e
 	}, nil
 }
 
+// GetEventInfo fetches the detailed view of a single event: its window, every
+// registration window, and the participant count per registration. Returns nil
+// (no error) when no event with that ID exists, so callers can distinguish
+// "not found" from a transport/GraphQL failure.
+func (c *Client) GetEventInfo(ctx context.Context, id int) (*domain.EventInfo, error) {
+	var resp eventInfoResponse
+	if err := c.runQuery(ctx, "GetEventInfo", map[string]interface{}{"id": id}, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Data.Event) == 0 {
+		return nil, nil
+	}
+
+	ev := resp.Data.Event[0]
+	info := &domain.EventInfo{
+		ID:      ev.ID,
+		Path:    ev.Path,
+		StartAt: ev.StartAt,
+		EndAt:   ev.EndAt,
+	}
+	for _, r := range ev.Registrations {
+		count := r.UsersAggregate.Aggregate.Count
+		info.Registrations = append(info.Registrations, domain.EventRegistration{
+			StartAt:      r.StartAt,
+			EndAt:        r.EndAt,
+			Participants: count,
+		})
+		info.Participants += count
+	}
+	return info, nil
+}
+
 // GetRegionUpdates fetches onboarding and registration stats for one campus.
 //
 // The pinned event IDs in events are the source of truth: each configured ID is

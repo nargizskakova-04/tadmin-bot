@@ -101,6 +101,111 @@ func TestParsePiscineFromCallback(t *testing.T) {
 	}
 }
 
+// TestResolveSpreadsheetID verifies the routing rule: Go/JS/AI1/AI2/AI3 use
+// their dedicated per-week sheet, while Piscine RUST (and any non-dedicated
+// piscine) falls back to the shared universal table.
+func TestResolveSpreadsheetID(t *testing.T) {
+	const universalID = "UNIVERSAL_SHEET_ID"
+	h := &Handler{
+		universalSheetID: universalID,
+		sheetIDs: map[domain.PiscineType]map[int]string{
+			domain.PiscineGo:   {1: "GO_W1"},
+			domain.PiscineJS:   {2: "JS_W2"},
+			domain.PiscineAI_1: {1: "AI1_W1"},
+			domain.PiscineAI_2: {3: "AI2_W3"},
+			domain.PiscineAI_3: {1: "AI3_W1"},
+		},
+	}
+
+	cases := []struct {
+		name          string
+		piscine       domain.PiscineType
+		week          int
+		wantID        string
+		wantDedicated bool
+	}{
+		{"go_dedicated", domain.PiscineGo, 1, "GO_W1", true},
+		{"js_dedicated", domain.PiscineJS, 2, "JS_W2", true},
+		{"ai1_dedicated", domain.PiscineAI_1, 1, "AI1_W1", true},
+		{"ai2_dedicated", domain.PiscineAI_2, 3, "AI2_W3", true},
+		{"ai3_dedicated", domain.PiscineAI_3, 1, "AI3_W1", true},
+		{"dedicated_but_week_unset", domain.PiscineGo, 9, "", true},
+		{"rust_universal", domain.PiscineRUST, 1, universalID, false},
+		{"unknown_universal", domain.PiscineType("Piscine Foo"), 2, universalID, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			gotID, gotDedicated := h.resolveSpreadsheetID(tc.piscine, tc.week)
+			if gotID != tc.wantID {
+				t.Errorf("id = %q, want %q", gotID, tc.wantID)
+			}
+			if gotDedicated != tc.wantDedicated {
+				t.Errorf("dedicated = %v, want %v", gotDedicated, tc.wantDedicated)
+			}
+		})
+	}
+}
+
+func TestParseTimeRange(t *testing.T) {
+	cases := []struct {
+		in             string
+		wantOK         bool
+		sh, sm, eh, em int
+	}{
+		{"11:00-17:00", true, 11, 0, 17, 0},
+		{" 09:30 - 12:45 ", true, 9, 30, 12, 45},
+		{"11:00-11:00", false, 0, 0, 0, 0}, // non-increasing
+		{"17:00-11:00", false, 0, 0, 0, 0}, // reversed
+		{"25:00-26:00", false, 0, 0, 0, 0}, // hour out of range
+		{"11:60-12:00", false, 0, 0, 0, 0}, // minute out of range
+		{"1100-1700", false, 0, 0, 0, 0},   // missing separators
+		{"11:00", false, 0, 0, 0, 0},       // missing end
+		{"", false, 0, 0, 0, 0},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			sh, sm, eh, em, ok := parseTimeRange(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if sh != tc.sh || sm != tc.sm || eh != tc.eh || em != tc.em {
+				t.Errorf("got %02d:%02d-%02d:%02d, want %02d:%02d-%02d:%02d",
+					sh, sm, eh, em, tc.sh, tc.sm, tc.eh, tc.em)
+			}
+		})
+	}
+}
+
+func TestBuildCapacityWarning(t *testing.T) {
+	// Enough capacity → no warning.
+	if got := buildCapacityWarning("11:00-17:00", 3, 30, 36, 30); got != "" {
+		t.Errorf("expected no warning when capacity suffices, got %q", got)
+	}
+	// Capacity exactly equals teams → no warning.
+	if got := buildCapacityWarning("11:00-17:00", 3, 30, 30, 30); got != "" {
+		t.Errorf("expected no warning when capacity equals teams, got %q", got)
+	}
+	// Platform reports no teams → no warning (window drives the table).
+	if got := buildCapacityWarning("11:00-17:00", 1, 30, 12, 0); got != "" {
+		t.Errorf("expected no warning when teams==0, got %q", got)
+	}
+	// Shortfall: fewer slots than teams → warning mentioning the numbers.
+	got := buildCapacityWarning("11:00-14:00", 3, 40, 12, 30)
+	if got == "" {
+		t.Fatal("expected a capacity shortfall warning")
+	}
+	for _, want := range []string{"11:00-14:00", "3 колон", "40 мин", "12 мест", "30"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning %q missing %q", got, want)
+		}
+	}
+}
+
 // TestNextMonday verifies the helper returns the *next* Monday (never today)
 // at 00:00 in the input's location, for every weekday.
 func TestNextMonday(t *testing.T) {

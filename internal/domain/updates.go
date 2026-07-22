@@ -71,6 +71,27 @@ type EventMeta struct {
 	EndAt      time.Time
 }
 
+// EventInfo is the detailed view of a single 01-edu event returned by the
+// /get_event command: the event window, its registration window(s), and the
+// number of participants. An event may expose more than one registration
+// window; Participants is the total across all of them.
+type EventInfo struct {
+	ID            int
+	Path          string
+	StartAt       time.Time
+	EndAt         time.Time
+	Registrations []EventRegistration
+	Participants  int // total participants across all registrations
+}
+
+// EventRegistration is one registration window of an event and the number of
+// users registered through it.
+type EventRegistration struct {
+	StartAt      time.Time
+	EndAt        time.Time
+	Participants int
+}
+
 type RegionUpdatesError struct {
 	Region string
 	Err    error

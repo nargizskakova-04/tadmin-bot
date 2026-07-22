@@ -48,6 +48,11 @@ type OneEduClient interface {
 	// with that ID exists. Used to verify pinned region events.
 	GetEventByID(ctx context.Context, id int) (*EventMeta, error)
 
+	// GetEventInfo returns the detailed view of a single event (window,
+	// registration windows, participant count), or nil if no event with that ID
+	// exists. Backs the /get_event command.
+	GetEventInfo(ctx context.Context, id int) (*EventInfo, error)
+
 	// GetRegionUpdates returns onboarding and registration stats for a campus.
 	// events pins the authoritative event IDs for the region; a zero-valued
 	// config makes every metric fall back to the default path-based lookup.

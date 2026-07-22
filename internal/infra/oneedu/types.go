@@ -109,6 +109,27 @@ type eventMetaNode struct {
 	Object  objectNode `json:"object"`
 }
 
+// eventInfoResponse is the response for GetEventInfo.
+type eventInfoResponse struct {
+	Data struct {
+		Event []eventInfoNode `json:"event"`
+	} `json:"data"`
+}
+
+type eventInfoNode struct {
+	ID            int                     `json:"id"`
+	Path          string                  `json:"path"`
+	StartAt       time.Time               `json:"startAt"`
+	EndAt         time.Time               `json:"endAt"`
+	Registrations []eventRegistrationNode `json:"registrations"`
+}
+
+type eventRegistrationNode struct {
+	StartAt        time.Time          `json:"startAt"`
+	EndAt          time.Time          `json:"endAt"`
+	UsersAggregate aggregateCountNode `json:"users_aggregate"`
+}
+
 type campusesResponse struct {
 	Data *campusesNode `json:"data"`
 }

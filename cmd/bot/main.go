@@ -129,6 +129,7 @@ func main() {
 		sheetsClient,
 		cfg.SheetIDs,
 		cfg.SheetURLs,
+		cfg.UniversalSheetID,
 		cfg.AdminChatIDs,
 		cfg.SuperAdminID,
 		loc,

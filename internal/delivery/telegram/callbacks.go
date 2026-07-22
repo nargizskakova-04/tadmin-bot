@@ -47,10 +47,14 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 
-	spreadsheetID := h.lookupSheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
+	spreadsheetID, dedicated := h.resolveSpreadsheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
 	if spreadsheetID == "" {
-		h.logger.Warn("no sheet configured for week", "piscine", piscine, "week", weekInfo.WeekNumber)
-		_ = h.adapter.SendMessage(ctx, chatID, msgSheetNotConfigured)
+		h.logger.Warn("no sheet configured", "piscine", piscine, "week", weekInfo.WeekNumber, "dedicated", dedicated)
+		msg := msgSheetNotConfigured
+		if !dedicated {
+			msg = msgUniversalSheetNotConfigured
+		}
+		_ = h.adapter.SendMessage(ctx, chatID, msg)
 		return
 	}
 
@@ -87,7 +91,7 @@ func (h *Handler) HandleCallbackEditParams(ctx context.Context, b *bot.Bot, upda
 
 	h.answer(ctx, b, cb.ID, "Изменение параметров")
 
-	if err := h.adapter.SendMessage(ctx, chatID, "🚧 Изменение параметров — в разработке"); err != nil {
+	if err := h.adapter.SendMessage(ctx, chatID, "✏️ Для настройки параметров таблицы отправьте команду /edit_tables"); err != nil {
 		h.logger.Error("send edit params response failed", "err", err)
 	}
 }

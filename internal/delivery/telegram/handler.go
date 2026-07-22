@@ -16,22 +16,25 @@ import (
 
 // Handler processes Telegram commands and callback queries.
 type Handler struct {
-	raidUC       *usecase.RaidUseCase
-	updatesUC    *usecase.UpdatesUseCase
-	accessUC     *usecase.AccessUseCase
-	adapter      *tgAdapter.Adapter
-	sheets       *sheets.Client // nil if Google Sheets is not configured
-	sheetIDs     map[domain.PiscineType]map[int]string
-	sheetURLs    map[domain.PiscineType]map[int]string
-	authorized   map[int64]bool // allowlist of group chat IDs permitted to issue commands
-	superAdminID int64          // the single user who approves/rejects access requests
-	loc          *time.Location // configured timezone, used for date arithmetic
-	logger       *slog.Logger
+	raidUC           *usecase.RaidUseCase
+	updatesUC        *usecase.UpdatesUseCase
+	accessUC         *usecase.AccessUseCase
+	adapter          *tgAdapter.Adapter
+	sheets           *sheets.Client // nil if Google Sheets is not configured
+	sheetIDs         map[domain.PiscineType]map[int]string
+	sheetURLs        map[domain.PiscineType]map[int]string
+	universalSheetID string            // shared fallback table for RUST / "other" pools
+	authorized       map[int64]bool    // allowlist of group chat IDs permitted to issue commands
+	superAdminID     int64             // the single user who approves/rejects access requests
+	loc              *time.Location    // configured timezone, used for date arithmetic
+	editSessions     *editSessionStore // in-memory /edit_tables dialog state, keyed by chat
+	logger           *slog.Logger
 }
 
 const (
-	msgSheetsNotConfigured = "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env"
-	msgSheetNotConfigured  = "⚠️ Таблица для этой недели не настроена. Добавьте SHEET_*_WEEK* в .env"
+	msgSheetsNotConfigured         = "⚠️ Google Sheets не настроен. Добавьте GOOGLE_CREDENTIALS_FILE в .env"
+	msgSheetNotConfigured          = "⚠️ Таблица для этой недели не настроена. Добавьте SHEET_*_WEEK* в .env"
+	msgUniversalSheetNotConfigured = "⚠️ Универсальная таблица не настроена. Добавьте SHEET_UNIVERSAL в .env"
 )
 
 // NewHandler wires the dependencies needed for command and callback handling.
@@ -48,6 +51,7 @@ func NewHandler(
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
 	sheetURLs map[domain.PiscineType]map[int]string,
+	universalSheetID string,
 	authorizedChatIDs []int64,
 	superAdminID int64,
 	loc *time.Location,
@@ -61,17 +65,19 @@ func NewHandler(
 		loc = time.UTC
 	}
 	return &Handler{
-		raidUC:       raidUC,
-		updatesUC:    updatesUC,
-		accessUC:     accessUC,
-		adapter:      adapter,
-		sheets:       sheetsClient,
-		sheetIDs:     sheetIDs,
-		sheetURLs:    sheetURLs,
-		authorized:   allow,
-		superAdminID: superAdminID,
-		loc:          loc,
-		logger:       logger,
+		raidUC:           raidUC,
+		updatesUC:        updatesUC,
+		accessUC:         accessUC,
+		adapter:          adapter,
+		sheets:           sheetsClient,
+		sheetIDs:         sheetIDs,
+		sheetURLs:        sheetURLs,
+		universalSheetID: universalSheetID,
+		authorized:       allow,
+		superAdminID:     superAdminID,
+		loc:              loc,
+		editSessions:     newEditSessionStore(),
+		logger:           logger,
 	}
 }
 
@@ -129,6 +135,29 @@ func (h *Handler) lookupSheetID(piscine domain.PiscineType, week int) string {
 		return m[week]
 	}
 	return ""
+}
+
+// isDedicatedPiscine reports whether a piscine has its own per-week sheet
+// (Go/JS/AI1/AI2/AI3). Everything else — Piscine RUST and any dynamically
+// discovered pool — shares the universal fallback table.
+func isDedicatedPiscine(p domain.PiscineType) bool {
+	switch p {
+	case domain.PiscineGo, domain.PiscineJS, domain.PiscineAI_1, domain.PiscineAI_2, domain.PiscineAI_3:
+		return true
+	default:
+		return false
+	}
+}
+
+// resolveSpreadsheetID picks the spreadsheet for a (piscine, week): the
+// dedicated per-week sheet for Go/JS/AI1/AI2/AI3, or the shared universal table
+// for Piscine RUST and any other (non-dedicated) piscine. dedicated reports
+// which branch was taken so callers can tailor their "not configured" message.
+func (h *Handler) resolveSpreadsheetID(piscine domain.PiscineType, week int) (id string, dedicated bool) {
+	if isDedicatedPiscine(piscine) {
+		return h.lookupSheetID(piscine, week), true
+	}
+	return h.universalSheetID, false
 }
 
 // now returns the current time in the configured location.
