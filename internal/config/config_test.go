@@ -30,6 +30,7 @@ func requiredEnvs() map[string]*string {
 		"ONEEDU_BASE_URL":         strp("https://learn.example.com"),
 		"PLATFORM_ACCESS_TOKEN":   strp("ptok"),
 		"CHAT_IDS":                strp("-100"), // now required
+		"SUPER_ADMIN_USER_ID":     strp("555"),  // now required
 		"TEMPLATES_PATH":          strp(""),
 		"TIMEZONE":                strp(""),
 		"GOOGLE_CREDENTIALS_FILE": strp(""),
@@ -253,6 +254,69 @@ func TestLoadRegionEvents_RejectsNonPositive(t *testing.T) {
 	t.Setenv("REGION_ASTANAHUB_CHECKIN_EVENT_ID", "0")
 	if _, err := loadRegionEvents(); err == nil {
 		t.Fatal("expected error for non-positive event ID")
+	}
+}
+
+// TestLoadSheetMaps_AIStreamsIndependent verifies that the three parallel AI
+// streams each land under their own domain.PiscineType and week, so AI1/AI2/AI3
+// do not overwrite one another in the sheet maps.
+func TestLoadSheetMaps_AIStreamsIndependent(t *testing.T) {
+	t.Setenv("SHEET_AI1_WEEK1", "https://docs.google.com/spreadsheets/d/AI1_WEEK1_ID/edit")
+	t.Setenv("SHEET_AI2_WEEK1", "https://docs.google.com/spreadsheets/d/AI2_WEEK1_ID/edit")
+	t.Setenv("SHEET_AI3_WEEK1", "https://docs.google.com/spreadsheets/d/AI3_WEEK1_ID/edit")
+
+	ids, urls := loadSheetMaps()
+
+	cases := []struct {
+		piscine domain.PiscineType
+		wantID  string
+	}{
+		{domain.PiscineAI_1, "AI1_WEEK1_ID"},
+		{domain.PiscineAI_2, "AI2_WEEK1_ID"},
+		{domain.PiscineAI_3, "AI3_WEEK1_ID"},
+	}
+	for _, tc := range cases {
+		if got := ids[tc.piscine][1]; got != tc.wantID {
+			t.Errorf("ids[%q][1] = %q, want %q", tc.piscine, got, tc.wantID)
+		}
+		if got := urls[tc.piscine][1]; got == "" {
+			t.Errorf("urls[%q][1] is empty, want the raw URL", tc.piscine)
+		}
+	}
+}
+
+// TestLoadSheetMaps_UniversalSheet verifies SHEET_UNIVERSAL is parsed into the
+// universal ID/URL fields via the shared spreadsheet-ID extraction, independent
+// of the per-piscine sheet maps.
+func TestLoad_UniversalSheet(t *testing.T) {
+	envs := requiredEnvs()
+	setEnv(t, envs)
+	t.Setenv("SHEET_UNIVERSAL", "https://docs.google.com/spreadsheets/d/UNIVERSAL_ID/edit")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.UniversalSheetID != "UNIVERSAL_ID" {
+		t.Errorf("UniversalSheetID = %q, want %q", cfg.UniversalSheetID, "UNIVERSAL_ID")
+	}
+	if cfg.UniversalSheetURL != "https://docs.google.com/spreadsheets/d/UNIVERSAL_ID/edit" {
+		t.Errorf("UniversalSheetURL = %q, want the raw URL", cfg.UniversalSheetURL)
+	}
+}
+
+// TestLoad_UniversalSheetUnset verifies the universal fields stay empty when
+// SHEET_UNIVERSAL is not configured (so the "not configured" path triggers).
+func TestLoad_UniversalSheetUnset(t *testing.T) {
+	setEnv(t, requiredEnvs())
+	t.Setenv("SHEET_UNIVERSAL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.UniversalSheetID != "" {
+		t.Errorf("UniversalSheetID = %q, want empty", cfg.UniversalSheetID)
 	}
 }
 

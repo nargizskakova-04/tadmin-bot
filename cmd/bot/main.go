@@ -13,6 +13,8 @@ import (
 	"github.com/joho/godotenv"
 
 	"admin-bot/internal/config"
+	"admin-bot/internal/domain"
+	"admin-bot/internal/infra/accessstore"
 	"admin-bot/internal/infra/oneedu"
 	"admin-bot/internal/infra/scheduler"
 	"admin-bot/internal/infra/sheets"
@@ -80,11 +82,39 @@ func main() {
 	strategies := []strategy.PiscineStrategy{
 		strategy.NewGoStrategy(),
 		strategy.NewJSStrategy(),
-		strategy.NewAIStrategy(),
+		strategy.NewAIStrategy(domain.PiscineAI_1),
+		strategy.NewAIStrategy(domain.PiscineAI_2),
+		strategy.NewAIStrategy(domain.PiscineAI_3),
+		strategy.NewRustStrategy(),
 	}
 
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
 	updatesUC := usecase.NewUpdatesUseCase(eduClient, cfg.RegionEvents)
+
+	// Access store: fail-closed. If it can't load we exit rather than silently
+	// running with an empty allowlist (which would deny every non-super-admin).
+	store, err := accessstore.New(cfg.AccessStorePath)
+	if err != nil {
+		logger.Error("failed to load access store", "path", cfg.AccessStorePath, "err", err)
+		os.Exit(1)
+	}
+	accessUC := usecase.NewAccessUseCase(store)
+
+	// Pre-seed hand-configured admins (ADMIN_USER_IDS) as approved so an existing
+	// allowlist keeps working after the switch to the request-based flow. The
+	// per-id check makes this idempotent and safe to run every start: users with
+	// an existing record (including a prior reject) are never overridden.
+	for _, id := range cfg.AdminUserIDs {
+		if _, ok := store.Get(id); ok {
+			continue
+		}
+		if _, err := accessUC.Approve(id); err != nil {
+			logger.Error("failed to pre-seed admin", "user_id", id, "err", err)
+			os.Exit(1)
+		}
+		logger.Info("pre-seeded admin as approved", "user_id", id)
+	}
+
 	tgAdapter, err := telegram.NewAdapter(cfg.TelegramToken, logger)
 	if err != nil {
 		logger.Error("failed to create telegram adapter", "err", err)
@@ -94,11 +124,14 @@ func main() {
 	handler := delivery.NewHandler(
 		raidUC,
 		updatesUC,
+		accessUC,
 		tgAdapter,
 		sheetsClient,
 		cfg.SheetIDs,
 		cfg.SheetURLs,
+		cfg.UniversalSheetID,
 		cfg.AdminChatIDs,
+		cfg.SuperAdminID,
 		loc,
 		logger,
 	)

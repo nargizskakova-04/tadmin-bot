@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"admin-bot/internal/domain"
@@ -15,8 +16,6 @@ type RaidUseCase struct {
 	templates  domain.TemplateRenderer
 	strategies map[domain.PiscineType]strategy.PiscineStrategy
 }
-
-
 
 // NewRaidUseCase constructs a RaidUseCase with the provided dependencies.
 func NewRaidUseCase(
@@ -59,6 +58,8 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 		return nil, fmt.Errorf("get raids: %w", err)
 	}
 
+	assignWeekNumbers(piscine, raids)
+
 	now := time.Now()
 
 	if active := findActiveRaid(raids, now); active != nil {
@@ -90,6 +91,124 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 	}
 
 	return nil, fmt.Errorf("could not determine current week for %s", piscine)
+}
+
+// GetCurrentPiscines returns every currently active piscine discovered by path.
+// Handlers go through this wrapper rather than reaching into the edu client
+// directly.
+func (uc *RaidUseCase) GetCurrentPiscines(ctx context.Context) ([]domain.PiscineEvent, error) {
+	return uc.eduClient.GetCurrentPiscines(ctx)
+}
+
+// GetUpcomingPiscines returns piscines that have not started yet.
+func (uc *RaidUseCase) GetUpcomingPiscines(ctx context.Context) ([]domain.PiscineEvent, error) {
+	return uc.eduClient.GetUpcomingPiscines(ctx)
+}
+
+// EventWeekInfo is the week-detection result for a dynamically discovered
+// piscine event (as opposed to a fixed PiscineType). Week numbers come from the
+// ordering of the event's raids, not a hardcoded raid-name map.
+type EventWeekInfo struct {
+	Event      domain.PiscineEvent
+	WeekNumber int              // 0 when the piscine has no raids at all
+	ActiveRaid *domain.RaidInfo // nil between raids, on the final week, or when there are no raids
+	HasRaids   bool
+}
+
+// DetectCurrentWeekForEvent determines the current week of a discovered piscine
+// event. Unlike DetectCurrentWeek it does not rely on RaidWeekMap: raids are
+// fetched generically, sorted by start date, and numbered 1..N. A piscine with
+// no raids at all (e.g. a plain module) yields WeekNumber 0 and HasRaids=false
+// rather than an error.
+func (uc *RaidUseCase) DetectCurrentWeekForEvent(ctx context.Context, event domain.PiscineEvent) (*EventWeekInfo, error) {
+	raids, err := uc.eduClient.GetRaidsByParentID(ctx, event.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get raids for event %d: %w", event.ID, err)
+	}
+
+	if len(raids) == 0 {
+		return &EventWeekInfo{Event: event, WeekNumber: 0, HasRaids: false}, nil
+	}
+
+	// Order defines the week number: earliest raid is week 1.
+	assignOrdinalWeeks(raids)
+
+	now := time.Now()
+
+	if active := findActiveRaid(raids, now); active != nil {
+		return &EventWeekInfo{Event: event, WeekNumber: active.WeekNumber, ActiveRaid: active, HasRaids: true}, nil
+	}
+
+	// No active raid. If every raid has ended, we're on the final-exam week,
+	// numbered one past the last raid.
+	if countEndedRaids(raids, now) >= len(raids) {
+		return &EventWeekInfo{Event: event, WeekNumber: len(raids) + 1, ActiveRaid: nil, HasRaids: true}, nil
+	}
+
+	// Between raids: the next upcoming raid tells us the week.
+	if next := findNextUpcomingRaid(raids, now); next != nil {
+		return &EventWeekInfo{Event: event, WeekNumber: next.WeekNumber, ActiveRaid: next, HasRaids: true}, nil
+	}
+
+	// Shouldn't happen (not active, not all ended, none upcoming), but fall back
+	// to week 1 rather than erroring on a discovered piscine.
+	return &EventWeekInfo{Event: event, WeekNumber: 1, ActiveRaid: nil, HasRaids: true}, nil
+}
+
+// ListRaidsWithWeeks returns every raid of a named piscine's current active
+// instance, each annotated with its week number. Used by the /edit_tables
+// dialog to offer a raid/week picker. Week numbering follows the same rule as
+// DetectCurrentWeek (see assignWeekNumbers).
+func (uc *RaidUseCase) ListRaidsWithWeeks(ctx context.Context, piscine domain.PiscineType) ([]domain.RaidInfo, error) {
+	piscineInfo, err := uc.eduClient.GetCurrentPiscineID(ctx, piscine)
+	if err != nil {
+		return nil, fmt.Errorf("get piscine ID: %w", err)
+	}
+	if piscineInfo == nil {
+		return nil, fmt.Errorf("no active piscine found for %s", piscine)
+	}
+
+	raids, err := uc.eduClient.GetRaidsByPiscineID(ctx, piscine, piscineInfo.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get raids: %w", err)
+	}
+
+	assignWeekNumbers(piscine, raids)
+	return raids, nil
+}
+
+// ListRaidsForEvent returns every raid of a dynamically discovered piscine
+// event, numbered ordinally by start date (the event has no raid-name map).
+func (uc *RaidUseCase) ListRaidsForEvent(ctx context.Context, eventID int) ([]domain.RaidInfo, error) {
+	raids, err := uc.eduClient.GetRaidsByParentID(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("get raids for event %d: %w", eventID, err)
+	}
+	assignOrdinalWeeks(raids)
+	return raids, nil
+}
+
+// assignWeekNumbers fills in raid week numbers for a named piscine. Piscines
+// with a hardcoded raid-name→week map (Go/JS/AI) already have their weeks set by
+// the edu client during mapping; those without one (e.g. Rust, fetched via the
+// generic parent-ID query) are numbered by raid order here. Centralizing this
+// rule keeps DetectCurrentWeek and ListRaidsWithWeeks in agreement.
+func assignWeekNumbers(piscine domain.PiscineType, raids []domain.RaidInfo) {
+	if len(domain.RaidWeekMap[piscine]) == 0 {
+		assignOrdinalWeeks(raids)
+	}
+}
+
+// assignOrdinalWeeks sorts raids by start date and numbers them 1..N. Used for
+// piscines without a hardcoded raid-name→week map (the raid order defines the
+// week).
+func assignOrdinalWeeks(raids []domain.RaidInfo) {
+	sort.Slice(raids, func(i, j int) bool {
+		return raids[i].StartDate.Before(raids[j].StartDate)
+	})
+	for i := range raids {
+		raids[i].WeekNumber = i + 1
+	}
 }
 
 // findActiveRaid returns a pointer to the raid currently in progress
@@ -195,7 +314,7 @@ func (uc *RaidUseCase) BuildDefenseReminder(
 	}
 
 	raid := weekInfo.ActiveRaid
-	schedule := CalculateDefenseSchedule(raid.TeamsCount)
+	schedule := CalculateDefenseSchedule(DefaultScheduleParams(raid.TeamsCount))
 
 	strat, ok := uc.strategies[piscine]
 	if !ok {

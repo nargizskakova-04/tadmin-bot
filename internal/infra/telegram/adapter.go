@@ -84,6 +84,45 @@ func (a *Adapter) SendMessageWithKeyboard(ctx context.Context, chatID int64, tex
 	return nil
 }
 
+// SendMessageWithReplyMarkup sends a message with an arbitrary reply markup
+// (inline keyboard, reply keyboard, or ForceReply). It exists so the
+// /edit_tables dialog can attach a ForceReply to its free-text prompts: in a
+// group with privacy mode enabled a bot never receives ordinary text, but a
+// reply to its own message is always delivered — ForceReply makes the user's
+// answer such a reply.
+func (a *Adapter) SendMessageWithReplyMarkup(ctx context.Context, chatID int64, text string, markup models.ReplyMarkup) error {
+	_, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      chatID,
+		Text:        text,
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: markup,
+	})
+	if err != nil {
+		err = a.scrub(err)
+		a.logger.Error("telegram send with reply markup failed", "chat_id", chatID, "err", err)
+		return fmt.Errorf("send message with reply markup: %w", err)
+	}
+	return nil
+}
+
+// EditMessageText replaces the text of an existing message and drops any inline
+// keyboard it carried (ReplyMarkup omitted). Used to turn the approve/reject
+// prompt into a settled "approved/rejected" line once the super-admin decides.
+func (a *Adapter) EditMessageText(ctx context.Context, chatID int64, messageID int, text string) error {
+	_, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Text:      text,
+		ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		err = a.scrub(err)
+		a.logger.Error("telegram edit failed", "chat_id", chatID, "message_id", messageID, "err", err)
+		return fmt.Errorf("edit message: %w", err)
+	}
+	return nil
+}
+
 // Start begins long-polling for updates.
 func (a *Adapter) Start(ctx context.Context) {
 	a.bot.Start(ctx)

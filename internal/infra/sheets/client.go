@@ -24,17 +24,16 @@ type Client struct {
 
 // Layout constants for the generated defense table.
 //
-// Note: these mirror the scheduling assumptions in
-// internal/usecase/defense.go (start hour, slot duration, break duration).
-// If those change, change these too.
+// Note: the slot/break durations mirror the scheduling assumptions in
+// internal/usecase/defense.go. The start hour and column count are no longer
+// fixed here — they travel in usecase.DefenseSchedule so /edit_tables can vary
+// them per table.
 const (
-	defenseStartHour = 11
-	slotDuration     = 30 * time.Minute
-	breakDuration    = 30 * time.Minute
-	groupColumns     = 3
-	totalColumns     = groupColumns + 1 // +1 for the time column
+	// slotDuration is only a fallback for schedules that don't carry an explicit
+	// slot length (SlotMinutes == 0). Normal paths set it via the schedule.
+	slotDuration = 30 * time.Minute
 
-	// sheetName is the tab name on every defense spreadsheet. The pre-created
+	// defaultClearRange wipes the first sheet before rewriting. The pre-created
 	// templates have a single tab — we always write to whatever its current
 	// name is by using an unqualified A1 notation (no "SheetName!" prefix),
 	// which targets the first sheet.
@@ -91,7 +90,7 @@ func (c *Client) UpdateDefenseTable(ctx context.Context, spreadsheetID string, p
 	}
 
 	// 4. Apply formatting (non-critical — log and continue on failure).
-	if err := c.formatSheet(ctx, spreadsheetID, sheetID, rowData); err != nil {
+	if err := c.formatSheet(ctx, spreadsheetID, sheetID, rowData, params.Schedule.Columns); err != nil {
 		c.logger.Warn("formatting failed (non-critical)", "spreadsheet_id", spreadsheetID, "err", err)
 	}
 

@@ -9,11 +9,16 @@ import (
 // formatSheet applies basic formatting: bold header, colored break rows,
 // column widths, and borders. Each formatting concern lives in its own helper;
 // this function just orchestrates the BatchUpdate.
-func (c *Client) formatSheet(ctx context.Context, spreadsheetID string, sheetID int64, rows []tableRow) error {
+func (c *Client) formatSheet(ctx context.Context, spreadsheetID string, sheetID int64, rows []tableRow, groupColumns int) error {
+	if groupColumns < 1 {
+		groupColumns = 1
+	}
+	totalColumns := int64(groupColumns + 1) // +1 for the time column
+
 	requests := []*sheets.Request{boldHeaderRequest(sheetID)}
 	requests = append(requests, breakRowRequests(sheetID, rows)...)
-	requests = append(requests, columnWidthRequests(sheetID)...)
-	requests = append(requests, bordersRequest(sheetID, int64(len(rows)+1)))
+	requests = append(requests, columnWidthRequests(sheetID, totalColumns)...)
+	requests = append(requests, bordersRequest(sheetID, int64(len(rows)+1), totalColumns))
 
 	_, err := c.sheetsSvc.Spreadsheets.BatchUpdate(spreadsheetID, &sheets.BatchUpdateSpreadsheetRequest{
 		Requests: requests,
@@ -70,8 +75,9 @@ func breakRowRequests(sheetID int64, rows []tableRow) []*sheets.Request {
 	return reqs
 }
 
-// columnWidthRequests sets column A (time) to 80px and B–D (groups) to 200px.
-func columnWidthRequests(sheetID int64) []*sheets.Request {
+// columnWidthRequests sets column A (time) to 80px and the group columns to
+// 200px each.
+func columnWidthRequests(sheetID, totalColumns int64) []*sheets.Request {
 	return []*sheets.Request{
 		columnWidthRequest(sheetID, 0, 1, 80),
 		columnWidthRequest(sheetID, 1, totalColumns, 200),
@@ -94,8 +100,8 @@ func columnWidthRequest(sheetID, start, end, pixelSize int64) *sheets.Request {
 }
 
 // bordersRequest adds a light-gray solid border around and between every cell
-// in the populated range (header + data rows × 4 columns).
-func bordersRequest(sheetID, totalRows int64) *sheets.Request {
+// in the populated range (header + data rows × totalColumns).
+func bordersRequest(sheetID, totalRows, totalColumns int64) *sheets.Request {
 	border := &sheets.Border{
 		Style: "SOLID",
 		Color: &sheets.Color{Red: 0.8, Green: 0.8, Blue: 0.8, Alpha: 1.0},

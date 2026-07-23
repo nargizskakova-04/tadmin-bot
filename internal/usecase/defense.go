@@ -8,48 +8,170 @@ import (
 )
 
 const (
-	columnsPerRow      = 3
 	slotDuration       = 30 * time.Minute
 	breakDuration      = 30 * time.Minute
-	defenseStartHour   = 11
-	defenseStartMin    = 0
 	maxConsecutiveRows = 5
+
+	// Defaults reproducing the historical hard-coded behavior. Callers that do
+	// not let the admin override the layout (the automatic /create_tables run and
+	// the scheduled defense reminder) pass these so their output is unchanged.
+	DefaultColumns     = 3
+	DefaultStartHour   = 11
+	DefaultStartMinute = 0
+	DefaultSlotMinutes = 30
 )
+
+// ScheduleParams captures the tunable inputs of a defense schedule. The
+// automatic paths pass the Default* values; /edit_tables supplies admin choices.
+type ScheduleParams struct {
+	TeamsCount    int
+	Columns       int // number of auditor / group columns
+	StartHour     int
+	StartMinute   int
+	IncludeBreaks bool
+}
 
 // DefenseSchedule holds the calculated defense table parameters.
 type DefenseSchedule struct {
 	TeamsCount          int
 	Rows                int
+	Columns             int // group columns, carried through to the sheet renderer
 	TotalSlots          int
-	BreakAfterRows      []int  // row numbers after which a break is inserted
+	StartHour           int // start time, so the sheet renderer needs no package constant
+	StartMinute         int
+	SlotMinutes         int    // slot length, so the sheet renderer needs no package constant
+	BreakAfterRows      []int  // slot-row numbers after which a break is inserted
 	RecommendedSchedule string // e.g. "11:00–17:30\nПерерывы: 13:30 и 15:30"
 	StartTime           string
 	EndTime             string
 	BreakTimes          []string // formatted break times
 }
 
-// CalculateDefenseSchedule computes the defense table layout for a given number of teams.
-func CalculateDefenseSchedule(teamsCount int) DefenseSchedule {
-	rows := int(math.Ceil(float64(teamsCount) / float64(columnsPerRow)))
-	totalSlots := rows * columnsPerRow
+// CalculateDefenseSchedule computes the defense table layout for the given
+// parameters. With IncludeBreaks=false no breaks are inserted at all.
+func CalculateDefenseSchedule(params ScheduleParams) DefenseSchedule {
+	columns := params.Columns
+	if columns < 1 {
+		columns = 1
+	}
 
-	breakAfterRows := computeBreaks(rows)
-	breakAfterRows = enforceMaxConsecutive(breakAfterRows, rows)
+	rows := int(math.Ceil(float64(params.TeamsCount) / float64(columns)))
+	totalSlots := rows * columns
 
-	startTime := time.Date(2000, 1, 1, defenseStartHour, defenseStartMin, 0, 0, time.UTC)
+	var breakAfterRows []int
+	if params.IncludeBreaks {
+		breakAfterRows = computeBreaks(rows)
+		breakAfterRows = enforceMaxConsecutive(breakAfterRows, rows)
+	}
+
+	startTime := time.Date(2000, 1, 1, params.StartHour, params.StartMinute, 0, 0, time.UTC)
 	endTime, breakTimes := computeTimes(startTime, rows, breakAfterRows)
 
 	schedule := formatSchedule(startTime, endTime, breakTimes)
 
 	return DefenseSchedule{
-		TeamsCount:          teamsCount,
+		TeamsCount:          params.TeamsCount,
 		Rows:                rows,
+		Columns:             columns,
 		TotalSlots:          totalSlots,
+		StartHour:           params.StartHour,
+		StartMinute:         params.StartMinute,
+		SlotMinutes:         int(slotDuration / time.Minute),
 		BreakAfterRows:      breakAfterRows,
 		RecommendedSchedule: schedule,
 		StartTime:           formatTime(startTime),
 		EndTime:             formatTime(endTime),
 		BreakTimes:          breakTimes,
+	}
+}
+
+// WindowScheduleParams drives the /edit_tables layout: the admin gives a time
+// window, a per-slot length, a column count, and optionally a break at a
+// specific time. The number of rows is however many whole slots fit in the
+// window — the team count does NOT limit it (an admin may build a table for a
+// pool the platform reports as empty).
+type WindowScheduleParams struct {
+	StartHour, StartMinute int
+	EndHour, EndMinute     int
+	SlotMinutes            int
+	Columns                int
+	IncludeBreaks          bool
+	BreakHour, BreakMinute int // used only when IncludeBreaks
+}
+
+// CalculateDefenseScheduleWindow fills [start, end] with back-to-back slots of
+// SlotMinutes each. When breaks are enabled, a single break (one slot long) is
+// placed at the first slot boundary at or after the requested break time. Rows
+// that would run past the window end are not added.
+func CalculateDefenseScheduleWindow(p WindowScheduleParams) DefenseSchedule {
+	cols := p.Columns
+	if cols < 1 {
+		cols = 1
+	}
+	slot := p.SlotMinutes
+	if slot < 1 {
+		slot = DefaultSlotMinutes
+	}
+
+	start := p.StartHour*60 + p.StartMinute
+	end := p.EndHour*60 + p.EndMinute
+	breakAt := p.BreakHour*60 + p.BreakMinute
+
+	var breakAfterRows []int
+	var breakTimes []string
+	current := start
+	rows := 0
+	breakDone := false
+
+	for {
+		// Insert the break once we've placed at least one slot and reached the
+		// requested time. It occupies one slot's worth of time.
+		if p.IncludeBreaks && !breakDone && rows >= 1 && current >= breakAt && breakAt > start {
+			if current+slot > end {
+				break // no room for the break itself
+			}
+			breakTimes = append(breakTimes, formatMinutes(current))
+			breakAfterRows = append(breakAfterRows, rows)
+			current += slot
+			breakDone = true
+			continue
+		}
+		if current+slot > end {
+			break
+		}
+		rows++
+		current += slot
+	}
+
+	return DefenseSchedule{
+		Rows:                rows,
+		Columns:             cols,
+		TotalSlots:          rows * cols,
+		StartHour:           p.StartHour,
+		StartMinute:         p.StartMinute,
+		SlotMinutes:         slot,
+		BreakAfterRows:      breakAfterRows,
+		BreakTimes:          breakTimes,
+		StartTime:           formatMinutes(start),
+		EndTime:             formatMinutes(current),
+		RecommendedSchedule: formatMinutes(start) + "–" + formatMinutes(current),
+	}
+}
+
+// formatMinutes renders minutes-since-midnight as "HH:MM".
+func formatMinutes(m int) string {
+	return fmt.Sprintf("%02d:%02d", (m/60)%24, m%60)
+}
+
+// DefaultScheduleParams builds the parameter set reproducing the historical
+// fixed layout (3 columns, 11:00 start, breaks on) for a given team count.
+func DefaultScheduleParams(teamsCount int) ScheduleParams {
+	return ScheduleParams{
+		TeamsCount:    teamsCount,
+		Columns:       DefaultColumns,
+		StartHour:     DefaultStartHour,
+		StartMinute:   DefaultStartMinute,
+		IncludeBreaks: true,
 	}
 }
 

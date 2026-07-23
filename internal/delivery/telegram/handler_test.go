@@ -1,12 +1,79 @@
 package telegram
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"admin-bot/internal/domain"
+	"admin-bot/internal/infra/accessstore"
+	"admin-bot/internal/usecase"
 )
+
+// TestIsAuthorized covers the private-chat / group / super-admin authorization
+// matrix. Telegram guarantees chatID == userID for private chats, so an
+// approved user is authorized in their DM with no per-chat allowlisting.
+func TestIsAuthorized(t *testing.T) {
+	const (
+		superAdmin  int64 = 999
+		approved    int64 = 100
+		pending     int64 = 200
+		rejected    int64 = 300
+		unknown     int64 = 400
+		allowedChat int64 = -100
+		otherChat   int64 = -500
+	)
+
+	store, err := accessstore.New(filepath.Join(t.TempDir(), "access.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	uc := usecase.NewAccessUseCase(store)
+	if _, err := uc.Approve(approved); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := uc.RequestAccess(pending, "", ""); err != nil {
+		t.Fatalf("request pending: %v", err)
+	}
+	if _, err := uc.RequestAccess(rejected, "", ""); err != nil {
+		t.Fatalf("request rejected: %v", err)
+	}
+	if _, err := uc.Reject(rejected); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+
+	h := &Handler{
+		accessUC:     uc,
+		superAdminID: superAdmin,
+		authorized:   map[int64]bool{allowedChat: true},
+	}
+
+	cases := []struct {
+		name           string
+		chatID, userID int64
+		want           bool
+	}{
+		{"super_admin_in_group", allowedChat, superAdmin, true},
+		{"super_admin_in_dm", superAdmin, superAdmin, true},
+		{"super_admin_in_random_group", otherChat, superAdmin, true},
+		{"approved_in_own_dm", approved, approved, true},
+		{"approved_in_allowed_group", allowedChat, approved, true},
+		{"approved_in_other_group", otherChat, approved, false},
+		{"pending_in_dm", pending, pending, false},
+		{"rejected_in_dm", rejected, rejected, false},
+		{"unknown_in_dm", unknown, unknown, false},
+		{"unknown_in_allowed_group", allowedChat, unknown, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := h.isAuthorized(tc.chatID, tc.userID); got != tc.want {
+				t.Errorf("isAuthorized(%d, %d) = %v, want %v", tc.chatID, tc.userID, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParsePiscineFromCallback(t *testing.T) {
 	cases := []struct {
@@ -31,6 +98,111 @@ func TestParsePiscineFromCallback(t *testing.T) {
 					tc.data, tc.prefix, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolveSpreadsheetID verifies the routing rule: Go/JS/AI1/AI2/AI3 use
+// their dedicated per-week sheet, while Piscine RUST (and any non-dedicated
+// piscine) falls back to the shared universal table.
+func TestResolveSpreadsheetID(t *testing.T) {
+	const universalID = "UNIVERSAL_SHEET_ID"
+	h := &Handler{
+		universalSheetID: universalID,
+		sheetIDs: map[domain.PiscineType]map[int]string{
+			domain.PiscineGo:   {1: "GO_W1"},
+			domain.PiscineJS:   {2: "JS_W2"},
+			domain.PiscineAI_1: {1: "AI1_W1"},
+			domain.PiscineAI_2: {3: "AI2_W3"},
+			domain.PiscineAI_3: {1: "AI3_W1"},
+		},
+	}
+
+	cases := []struct {
+		name          string
+		piscine       domain.PiscineType
+		week          int
+		wantID        string
+		wantDedicated bool
+	}{
+		{"go_dedicated", domain.PiscineGo, 1, "GO_W1", true},
+		{"js_dedicated", domain.PiscineJS, 2, "JS_W2", true},
+		{"ai1_dedicated", domain.PiscineAI_1, 1, "AI1_W1", true},
+		{"ai2_dedicated", domain.PiscineAI_2, 3, "AI2_W3", true},
+		{"ai3_dedicated", domain.PiscineAI_3, 1, "AI3_W1", true},
+		{"dedicated_but_week_unset", domain.PiscineGo, 9, "", true},
+		{"rust_universal", domain.PiscineRUST, 1, universalID, false},
+		{"unknown_universal", domain.PiscineType("Piscine Foo"), 2, universalID, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			gotID, gotDedicated := h.resolveSpreadsheetID(tc.piscine, tc.week)
+			if gotID != tc.wantID {
+				t.Errorf("id = %q, want %q", gotID, tc.wantID)
+			}
+			if gotDedicated != tc.wantDedicated {
+				t.Errorf("dedicated = %v, want %v", gotDedicated, tc.wantDedicated)
+			}
+		})
+	}
+}
+
+func TestParseTimeRange(t *testing.T) {
+	cases := []struct {
+		in             string
+		wantOK         bool
+		sh, sm, eh, em int
+	}{
+		{"11:00-17:00", true, 11, 0, 17, 0},
+		{" 09:30 - 12:45 ", true, 9, 30, 12, 45},
+		{"11:00-11:00", false, 0, 0, 0, 0}, // non-increasing
+		{"17:00-11:00", false, 0, 0, 0, 0}, // reversed
+		{"25:00-26:00", false, 0, 0, 0, 0}, // hour out of range
+		{"11:60-12:00", false, 0, 0, 0, 0}, // minute out of range
+		{"1100-1700", false, 0, 0, 0, 0},   // missing separators
+		{"11:00", false, 0, 0, 0, 0},       // missing end
+		{"", false, 0, 0, 0, 0},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			sh, sm, eh, em, ok := parseTimeRange(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if sh != tc.sh || sm != tc.sm || eh != tc.eh || em != tc.em {
+				t.Errorf("got %02d:%02d-%02d:%02d, want %02d:%02d-%02d:%02d",
+					sh, sm, eh, em, tc.sh, tc.sm, tc.eh, tc.em)
+			}
+		})
+	}
+}
+
+func TestBuildCapacityWarning(t *testing.T) {
+	// Enough capacity → no warning.
+	if got := buildCapacityWarning("11:00-17:00", 3, 30, 36, 30); got != "" {
+		t.Errorf("expected no warning when capacity suffices, got %q", got)
+	}
+	// Capacity exactly equals teams → no warning.
+	if got := buildCapacityWarning("11:00-17:00", 3, 30, 30, 30); got != "" {
+		t.Errorf("expected no warning when capacity equals teams, got %q", got)
+	}
+	// Platform reports no teams → no warning (window drives the table).
+	if got := buildCapacityWarning("11:00-17:00", 1, 30, 12, 0); got != "" {
+		t.Errorf("expected no warning when teams==0, got %q", got)
+	}
+	// Shortfall: fewer slots than teams → warning mentioning the numbers.
+	got := buildCapacityWarning("11:00-14:00", 3, 40, 12, 30)
+	if got == "" {
+		t.Fatal("expected a capacity shortfall warning")
+	}
+	for _, want := range []string{"11:00-14:00", "3 колон", "40 мин", "12 мест", "30"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning %q missing %q", got, want)
+		}
 	}
 }
 
@@ -95,8 +267,10 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 		SignedUpWithoutOnboarding: 12,
 		SucceededOnboardingGames:  34,
 		CheckinRegistrations:      56,
-		PiscineGoRegistrations:    78,
-		CoreUsers:                 90,
+		PiscineRegistrations: []domain.PiscineRegistrationCount{
+			{Label: "ai-curriculum/prompt-piscine", Path: "/a<b/ai-curriculum/prompt-piscine", Count: 78},
+		},
+		CoreUsers: 90,
 	}, "02.07.2026")
 
 	wantParts := []string{
@@ -104,7 +278,7 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 		"- 12 заявок",
 		"- 34 прошли игры",
 		"- 56 reg на check-in",
-		"- 78 reg на piscine",
+		"- 78 reg на ai-curriculum/prompt-piscine",
 	}
 	for _, part := range wantParts {
 		if !strings.Contains(got, part) {
@@ -114,24 +288,40 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 }
 
 // TestFormatRegionUpdatesMessage_StaleEvent verifies a metric backed by a stale
-// pinned event is shown as unavailable rather than as a (misleading) count.
+// pinned event (check-in) is shown as unavailable rather than as a (misleading)
+// count.
 func TestFormatRegionUpdatesMessage_StaleEvent(t *testing.T) {
 	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
-		Region:                 "shymkent",
-		CheckinRegistrations:   56,
-		PiscineGoRegistrations: 78,
+		Region:               "shymkent",
+		CheckinRegistrations: 56,
 		StaleEvents: []domain.StaleEvent{
-			{Type: domain.EventPiscineGo, EventID: 222, Reason: "ended"},
+			{Type: domain.EventCheckin, EventID: 111, Reason: "ended"},
 		},
 	}, "02.07.2026")
 
-	if !strings.Contains(got, "- 56 reg на check-in") {
-		t.Errorf("check-in should still show its count:\n%s", got)
+	if strings.Contains(got, "56 reg на check-in") {
+		t.Errorf("stale check-in metric must not show its count:\n%s", got)
 	}
-	if strings.Contains(got, "78 reg на piscine") {
-		t.Errorf("stale piscine metric must not show its count:\n%s", got)
+	if !strings.Contains(got, "⚠️ reg на check-in") {
+		t.Errorf("stale check-in metric should be flagged unavailable:\n%s", got)
 	}
-	if !strings.Contains(got, "⚠️ reg на piscine") {
-		t.Errorf("stale piscine metric should be flagged unavailable:\n%s", got)
+}
+
+// TestFormatRegionUpdatesMessage_UpcomingPiscine verifies upcoming piscines are
+// annotated with their start date.
+func TestFormatRegionUpdatesMessage_UpcomingPiscine(t *testing.T) {
+	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region: "astanahub",
+		PiscineRegistrations: []domain.PiscineRegistrationCount{
+			{Label: "ai-curriculum/prompt-piscine", Count: 42},
+			{Label: "module/piscine-rust", Count: 17, Upcoming: true, StartAt: time.Date(2026, 7, 6, 5, 0, 0, 0, time.UTC)},
+		},
+	}, "02.07.2026")
+
+	if !strings.Contains(got, "- 42 reg на ai-curriculum/prompt-piscine\n") {
+		t.Errorf("current piscine line missing:\n%s", got)
+	}
+	if !strings.Contains(got, "- 17 reg на module/piscine-rust (скоро старт: 06.07)") {
+		t.Errorf("upcoming piscine line missing start annotation:\n%s", got)
 	}
 }

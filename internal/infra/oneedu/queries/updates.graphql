@@ -2,7 +2,13 @@ query GetAstanaUpdates(
   $startDate: timestamptz!
   $endDate: timestamptz!
 ) {
-  total_astana: user_aggregate {
+  total_astana: user_aggregate(where: {
+    _or: [
+      { progresses: { campus: { _eq: "astanahub" } } },
+      { _not: { progresses: {} } },
+      { roles: {} }
+    ]
+  }) {
     aggregate {
       count
     }
@@ -40,11 +46,16 @@ query GetAstanaUpdates(
       count
     }
   }
+}
 
-  piscinego_astana: registration_user_aggregate(
+query GetRegistrationCountByPath(
+  $path: String!
+  $endDate: timestamptz!
+) {
+  registrations: registration_user_aggregate(
     where: {
       registration: {
-        path: { _eq: "/astanahub/piscinego" }
+        path: { _eq: $path }
         endAt: { _gt: $endDate }
       }
     }
@@ -71,6 +82,24 @@ query GetEventByID($id: Int!) {
   }
 }
 
+query GetEventInfo($id: Int!) {
+  event(where: { id: { _eq: $id } }) {
+    id
+    startAt
+    endAt
+    path
+    registrations {
+      startAt
+      endAt
+      users_aggregate {
+        aggregate {
+          count
+        }
+      }
+    }
+  }
+}
+
 query region_stats(
   $campus: String!
   $startDate: timestamptz!
@@ -78,7 +107,6 @@ query region_stats(
   $adminRole: String!
   $gamesPath: String!
   $checkinPath: String!
-  $piscinegoPath: String!
   $corePath: String!
 ) {
   signed_up_no_onboarding: user_aggregate(
@@ -120,19 +148,6 @@ query region_stats(
     where: {
       registration: {
         path: { _eq: $checkinPath }
-        endAt: { _gt: $endDate }
-      }
-    }
-  ) {
-    aggregate {
-      count
-    }
-  }
-
-  piscinego: registration_user_aggregate(
-    where: {
-      registration: {
-        path: { _eq: $piscinegoPath }
         endAt: { _gt: $endDate }
       }
     }

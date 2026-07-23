@@ -22,8 +22,8 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 
-	if !h.isAuthorized(chatID) {
-		h.logger.Warn("unauthorized callback", "data", "defense_create", "chat_id", chatID)
+	if !h.isAuthorized(chatID, cb.From.ID) {
+		h.logger.Warn("unauthorized callback", "data", "defense_create", "chat_id", chatID, "user_id", cb.From.ID)
 		h.answer(ctx, b, cb.ID, "Недостаточно прав")
 		return
 	}
@@ -47,10 +47,14 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 
-	spreadsheetID := h.lookupSheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
+	spreadsheetID, dedicated := h.resolveSpreadsheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
 	if spreadsheetID == "" {
-		h.logger.Warn("no sheet configured for week", "piscine", piscine, "week", weekInfo.WeekNumber)
-		_ = h.adapter.SendMessage(ctx, chatID, msgSheetNotConfigured)
+		h.logger.Warn("no sheet configured", "piscine", piscine, "week", weekInfo.WeekNumber, "dedicated", dedicated)
+		msg := msgSheetNotConfigured
+		if !dedicated {
+			msg = msgUniversalSheetNotConfigured
+		}
+		_ = h.adapter.SendMessage(ctx, chatID, msg)
 		return
 	}
 
@@ -79,15 +83,15 @@ func (h *Handler) HandleCallbackEditParams(ctx context.Context, b *bot.Bot, upda
 		return
 	}
 
-	if !h.isAuthorized(chatID) {
-		h.logger.Warn("unauthorized callback", "data", "defense_edit", "chat_id", chatID)
+	if !h.isAuthorized(chatID, cb.From.ID) {
+		h.logger.Warn("unauthorized callback", "data", "defense_edit", "chat_id", chatID, "user_id", cb.From.ID)
 		h.answer(ctx, b, cb.ID, "Недостаточно прав")
 		return
 	}
 
 	h.answer(ctx, b, cb.ID, "Изменение параметров")
 
-	if err := h.adapter.SendMessage(ctx, chatID, "🚧 Изменение параметров — в разработке"); err != nil {
+	if err := h.adapter.SendMessage(ctx, chatID, "✏️ Для настройки параметров таблицы отправьте команду /edit_tables"); err != nil {
 		h.logger.Error("send edit params response failed", "err", err)
 	}
 }

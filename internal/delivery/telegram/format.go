@@ -23,8 +23,26 @@ func formatRegionUpdatesMessage(info domain.RegionUpdatesInfo, date string) stri
 	fmt.Fprintf(&sb, "- %d заявок\n", info.SignedUpWithoutOnboarding)
 	fmt.Fprintf(&sb, "- %d прошли игры\n", info.SucceededOnboardingGames)
 	writeRegionMetric(&sb, info, domain.EventCheckin, info.CheckinRegistrations, "reg на check-in")
-	writeRegionMetric(&sb, info, domain.EventPiscineGo, info.PiscineGoRegistrations, "reg на piscine")
+	writePiscineRegistrations(&sb, info.PiscineRegistrations)
 	return sb.String()
+}
+
+// writePiscineRegistrations renders one line per discovered piscine (current
+// and upcoming), showing its module/curriculum path. Upcoming piscines are
+// annotated with their start date.
+func writePiscineRegistrations(sb *strings.Builder, regs []domain.PiscineRegistrationCount) {
+	for _, r := range regs {
+		label := r.Label
+		if label == "" {
+			label = r.Path
+		}
+		if r.Upcoming {
+			fmt.Fprintf(sb, "- %d reg на %s (скоро старт: %s)\n",
+				r.Count, escapeHTML(label), r.StartAt.Format("02.01"))
+			continue
+		}
+		fmt.Fprintf(sb, "- %d reg на %s\n", r.Count, escapeHTML(label))
+	}
 }
 
 // writeRegionMetric writes a metric line, or an "unavailable" notice when the
@@ -35,6 +53,50 @@ func writeRegionMetric(sb *strings.Builder, info domain.RegionUpdatesInfo, t dom
 		return
 	}
 	fmt.Fprintf(sb, "- %d %s\n", count, label)
+}
+
+// formatEventInfoMessage renders a single event's detail block for /get_event:
+// participant count, event window, and registration window(s). Times are shown
+// in loc (the configured timezone) so they match what admins see locally. A
+// single registration collapses to one line; multiple windows are listed with
+// their individual participant counts.
+func formatEventInfoMessage(info domain.EventInfo, loc *time.Location) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📅 <b>Ивент</b> (id %d)\n", info.ID)
+	if p := strings.TrimSpace(info.Path); p != "" {
+		fmt.Fprintf(&sb, "🔗 %s\n", escapeHTML(p))
+	}
+	fmt.Fprintf(&sb, "👥 Участников: %d\n", info.Participants)
+	fmt.Fprintf(&sb, "🚀 Ивент: %s — %s\n",
+		fmtEventTime(info.StartAt, loc), fmtEventTime(info.EndAt, loc))
+
+	switch len(info.Registrations) {
+	case 0:
+		sb.WriteString("📝 Регистрация: —\n")
+	case 1:
+		r := info.Registrations[0]
+		fmt.Fprintf(&sb, "📝 Регистрация: %s — %s\n",
+			fmtEventTime(r.StartAt, loc), fmtEventTime(r.EndAt, loc))
+	default:
+		sb.WriteString("📝 Регистрации:\n")
+		for _, r := range info.Registrations {
+			fmt.Fprintf(&sb, "  • %s — %s (%d уч.)\n",
+				fmtEventTime(r.StartAt, loc), fmtEventTime(r.EndAt, loc), r.Participants)
+		}
+	}
+	return sb.String()
+}
+
+// fmtEventTime formats an event/registration timestamp in loc, or returns "—"
+// for a zero (missing) time.
+func fmtEventTime(t time.Time, loc *time.Location) string {
+	if t.IsZero() {
+		return "—"
+	}
+	if loc != nil {
+		t = t.In(loc)
+	}
+	return t.Format("02.01.2006 15:04")
 }
 
 // htmlEscaper escapes the characters significant in Telegram's HTML parse mode.

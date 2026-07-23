@@ -44,7 +44,15 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Optional: mount a service-account file instead of GOOGLE_CREDENTIALS_JSON.
-    # Set GOOGLE_CREDENTIALS_FILE=/secrets/credentials.json in .env to use it.
-    # volumes:
-    #   - ./credentials.json:/secrets/credentials.json:ro
+    # Persist the access store (ACCESS_STORE_PATH, default /app/data/access.json)
+    # across container re-creation. Without this, every `docker compose up --build`
+    # starts with an empty store and all admins approved via the bot are lost
+    # (only ADMIN_USER_IDS pre-seeded ones would come back).
+    volumes:
+      - access-data:/app/data
+      # Optional: mount a service-account file instead of GOOGLE_CREDENTIALS_JSON.
+      # Set GOOGLE_CREDENTIALS_FILE=/secrets/credentials.json in .env to use it.
+      # - ./credentials.json:/secrets/credentials.json:ro
+
+volumes:
+  access-data:
