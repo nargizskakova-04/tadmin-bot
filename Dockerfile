@@ -5,18 +5,23 @@
 # Deployment target: Railway.
 #
 # Environment variables (inject via Railway → Variables, NOT a .env file):
-#   Required: TELEGRAM_TOKEN, ONEEDU_BASE_URL (https://), PLATFORM_ACCESS_TOKEN, CHAT_IDS
-#   Authorization: ADMIN_CHAT_IDS (optional; defaults to CHAT_IDS) — only these
-#                  chats may issue commands / press inline buttons.
-#   Optional: TIMEZONE, TEMPLATES_PATH, GOOGLE_CREDENTIALS_FILE,
-#             GOOGLE_CREDENTIALS_JSON, SHEET_*_WEEK*
+#   Required: TELEGRAM_TOKEN, ONEEDU_BASE_URL (https://), PLATFORM_ACCESS_TOKEN,
+#             CHAT_IDS, SUPER_ADMIN_USER_ID
+#   Authorization (request/approve flow): SUPER_ADMIN_USER_ID approves access
+#             requests via inline buttons; ADMIN_USER_IDS pre-seeds an approved
+#             allowlist on first start; approved users work in DMs, and in group
+#             chats listed in ADMIN_CHAT_IDS (defaults to CHAT_IDS). Approved
+#             users persist in ACCESS_STORE_PATH (default data/access.json).
+#   Optional: TIMEZONE, TEMPLATES_PATH, ADMIN_USER_IDS, ACCESS_STORE_PATH,
+#             ADMIN_CHAT_IDS, GOOGLE_CREDENTIALS_FILE, GOOGLE_CREDENTIALS_JSON,
+#             GOOGLE_FOLDER_ID, SHEET_*_WEEK*, SHEET_UNIVERSAL, REGION_*_EVENT_ID
 #             ONEEDU_ALLOW_INSECURE=1 (local dev only; permits http:// upstream)
 ###############################################################################
 
 ###############################################################################
 # Stage 1 — builder
 ###############################################################################
-FROM golang:1.22.5-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /src
 
@@ -44,6 +49,12 @@ RUN adduser -D -u 10001 appuser
 # access here. Copy directly as appuser instead of a separate chown -R layer.
 COPY --from=builder --chown=appuser:appuser /src/bot ./bot
 COPY --from=builder --chown=appuser:appuser /src/messages ./messages
+
+# The access store (ACCESS_STORE_PATH, default data/access.json) is written at
+# runtime by the non-root appuser. /app is root-owned, so appuser cannot create
+# data/ itself — pre-create it and hand it over. Persist this dir with a volume
+# (see docker-compose.yml) so approved admins survive container re-creation.
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
 
 USER appuser
 

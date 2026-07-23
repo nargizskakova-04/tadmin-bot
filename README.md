@@ -4,7 +4,13 @@
 
 ## Что делает бот
 
-Бот поддерживает три типа Piscine: **Go** (4 недели), **JS** (4 недели), **AI** (3 недели). Каждую неделю он автоматически определяет текущую неделю через 01-edu API и отправляет нужные сообщения:
+Бот обслуживает шесть параллельных Piscine (все по 4 недели, включая неделю финального экзамена):
+
+- **Piscine Go** и **Piscine JS** — с хакатоном на 3-й неделе;
+- **Piscine AI 1 / AI 2 / AI 3** — три независимых параллельных потока одной AI-программы (различаются `parent.id`);
+- **Piscine RUST** — без захардкоженных имён рейдов (generic-логика, номер недели по порядку рейдов).
+
+Каждую неделю бот автоматически определяет текущую неделю через 01-edu API и отправляет нужные сообщения:
 
 | День | Время | Сообщение | Недели |
 |------|-------|-----------|--------|
@@ -55,7 +61,7 @@ messages/                                — шаблоны сообщений (
 
 ### Требования
 
-- Go 1.22+
+- Go 1.25+
 - Telegram Bot Token (от [@BotFather](https://t.me/BotFather))
 - Доступ к 01-edu API (base URL + access token)
 - Google Cloud сервисный аккаунт (для Google Sheets, опционально)
@@ -81,20 +87,34 @@ cp .env.example .env
 | Переменная | Обязательная | Описание |
 |---|---|---|
 | `TELEGRAM_TOKEN` | да | Токен Telegram-бота |
-| `ONEEDU_BASE_URL` | да | URL платформы 01-edu (например `learn.tomorrow-school.com`) |
+| `ONEEDU_BASE_URL` | да | URL платформы 01-edu (например `01.tomorrow-school.ai`); схема `https://` подставляется автоматически |
 | `PLATFORM_ACCESS_TOKEN` | да | Access token для 01-edu API |
-| `CHAT_IDS` | да | ID чатов через запятую (например `-100123456789,-100987654321`) |
-| `TIMEZONE` | нет | Часовой пояс для cron (по умолчанию `Asia/Almaty`) |
+| `CHAT_IDS` | да | ID чатов-получателей рассылки через запятую (например `-100123456789,-100987654321`) |
+| `SUPER_ADMIN_USER_ID` | да | Единственный user ID, который принимает запросы доступа и жмёт Approve/Reject. Всегда авторизован |
+| `ADMIN_USER_IDS` | нет | Список user ID через запятую, предодобряемых при первом старте (готовый allowlist) |
+| `ACCESS_STORE_PATH` | нет | Путь к JSON-файлу одобренных пользователей (по умолчанию `data/access.json`) |
+| `ADMIN_CHAT_IDS` | нет | Allowlist групповых чатов, где одобренные пользователи могут выполнять команды (по умолчанию = `CHAT_IDS`) |
+| `TIMEZONE` | нет | Часовой пояс для cron и расчёта дат (по умолчанию `Asia/Almaty`) |
 | `TEMPLATES_PATH` | нет | Путь к шаблонам (по умолчанию `messages`) |
-| `GOOGLE_CREDENTIALS_FILE` | нет | Путь к JSON-ключу сервисного аккаунта Google |
+| `GOOGLE_CREDENTIALS_FILE` | нет | Путь к JSON-ключу сервисного аккаунта Google (для локального запуска / монтирования файла) |
+| `GOOGLE_CREDENTIALS_JSON` | нет | Инлайн-содержимое JSON-ключа Google (для платформ без монтирования файлов, напр. Railway). Записывается во временный файл на старте |
+| `SHEET_GO_WEEK{1..3}`, `SHEET_JS_WEEK{1..3}`, `SHEET_AI{1..3}_WEEK{1..4}` | нет | URL Google-таблиц защит по пискине и неделе |
+| `SHEET_UNIVERSAL` | нет | Общая fallback-таблица защит для пискин без своей (Piscine RUST и динамически найденные пулы) |
+| `REGION_<NAME>_{CHECKIN,PISCINE,MODULE}_EVENT_ID` | нет | Пины авторитетных event ID по региону для `/get_region_updates` (см. заметку ниже) |
+
+> **Регион-события.** Источник истины для `/get_region_updates` — это event ID, а не имя/порядок события. Любая метрика без пина откатывается на дефолтный поиск по path, так что пустые значения сохраняют прежнее поведение. Формат: `REGION_ASTANAHUB_CHECKIN_EVENT_ID=12345` (имя региона — регистронезависимо).
+
+> **`GOOGLE_FOLDER_ID`.** Присутствует в `.env.example`, но **сейчас не читается кодом** — это неиспользуемая переменная (кандидат на удаление или на доработку логики размещения таблиц в конкретной папке Drive).
 
 ### Настройка Google Sheets (опционально)
 
 1. Создайте проект в [Google Cloud Console](https://console.cloud.google.com/)
 2. Включите **Google Sheets API** и **Google Drive API**
 3. Создайте **Service Account** → скачайте JSON-ключ
-4. Положите JSON-файл в корень проекта (например `credentials.json`)
-5. Укажите путь в `.env`: `GOOGLE_CREDENTIALS_FILE=credentials.json`
+4. Дайте сервисному аккаунту доступ к нужным таблицам (Share → email сервисного аккаунта)
+5. Подключите креды одним из двух способов:
+   - **Локально / свой сервер:** положите JSON в корень (например `credentials.json`) и укажите `GOOGLE_CREDENTIALS_FILE=credentials.json`.
+   - **Railway / платформы без файлов:** вставьте всё содержимое JSON в переменную `GOOGLE_CREDENTIALS_JSON` — на старте бот запишет его во временный файл и подхватит автоматически.
 
 Без этой настройки бот работает, но кнопка «Создать таблицу» будет недоступна.
 
@@ -186,109 +206,46 @@ go test -race -v ./internal/config/...
 
 Итого: 71 тестовая функция, ~200 sub-cases.
 
+## Управление доступом
+
+Авторизация построена на схеме «запрос → одобрение», а не на статическом списке чатов:
+
+1. **Супер-админ** (`SUPER_ADMIN_USER_ID`) авторизован всегда и получает запросы доступа с inline-кнопками **Approve / Reject**.
+2. Новый пользователь пишет боту и запрашивает доступ; запрос уходит супер-админу, который одобряет или отклоняет его кнопкой.
+3. Одобренные пользователи сохраняются в JSON-стор (`ACCESS_STORE_PATH`, по умолчанию `data/access.json`) и работают в личке с ботом без доп. настройки; в групповых чатах команды разрешены только если чат есть в `ADMIN_CHAT_IDS` (по умолчанию `= CHAT_IDS`).
+4. `ADMIN_USER_IDS` — заранее одобренный allowlist: при первом старте (пустой стор) эти ID добавляются как approved, чтобы существующий список админов продолжил работать. Идемпотентно: пользователи с уже существующей записью (в т.ч. отклонённые) не перезатираются.
+
+Стор — единственное персистентное состояние бота. При деплое в контейнере его нужно хранить на volume (см. ниже), иначе все одобренные через бота админы теряются при пересоздании контейнера (вернутся только предодобренные `ADMIN_USER_IDS`).
+
+## Деплой
+
+Бот работает в режиме long-polling (только исходящий трафик), поэтому **не требует `EXPOSE` и открытых портов**.
+
+### Docker Compose (локально / свой сервер)
+
+```bash
+docker compose up -d --build      # сборка + запуск в фоне
+docker compose logs -f            # смотреть логи
+docker compose down               # остановить и удалить контейнер
+```
+
+Конфигурация подхватывается из `.env` (тот же файл, что читает бинарник локально). Секреты не попадают в образ: `.dockerignore` держит `.env*` вне build-контекста, compose монтирует их только на рантайме через `env_file`. Одобренные админы (`data/access.json`) переживают пересоздание контейнера благодаря именованному volume `access-data:/app/data`.
+
+### Railway
+
+1. Заведите переменные из `.env.example` один в один в **Variables**: обязательные `TELEGRAM_TOKEN`, `ONEEDU_BASE_URL`, `PLATFORM_ACCESS_TOKEN`, `CHAT_IDS`, `SUPER_ADMIN_USER_ID` плюс нужные опциональные (`TIMEZONE`, `ADMIN_USER_IDS`, `SHEET_*`, `REGION_*_EVENT_ID`, …).
+2. Google-креды передавайте **инлайном** через `GOOGLE_CREDENTIALS_JSON` (вставьте всё содержимое JSON-ключа) — Railway не монтирует файлы, поэтому `GOOGLE_CREDENTIALS_FILE` там не подходит. На старте бот запишет JSON во временный файл и подхватит его.
+3. `ACCESS_STORE_PATH` по умолчанию `data/access.json`; для персистентности одобренных админов между деплоями примонтируйте volume к `/app/data` (иначе стор сбрасывается на каждом деплое).
+
 ## Стек
 
-- **Go** 1.22+
+- **Go** 1.25+
 - [go-telegram/bot](https://github.com/go-telegram/bot) — Telegram Bot API
 - [robfig/cron/v3](https://github.com/robfig/cron) — cron-планировщик
 - [google.golang.org/api](https://pkg.go.dev/google.golang.org/api) — Google Sheets & Drive API
 - [joho/godotenv](https://github.com/joho/godotenv) — загрузка .env
 - 01-edu GraphQL API — данные о рейдах и командах
 
-query {
-  user_aggregate{ #registatration count
-    aggregate {
-      count
-    }
-  }
-  registration_user{ #checkin, piscine
-    userLogin
-    registration{
-      path
-      id
-    }
-  }
-
-}
-
-
-
-
-
-query onboarding_games_stats(
-  $adminRole: String!
-  $startDate: timestamptz!
-  $endDate: timestamptz!
-) {
-  total: user_aggregate{ 
-    aggregate {
-      count
-    }
-  }
-  succeeded: progress_aggregate(
-    where: {
-      path: { _eq: "/astanahub/onboarding/games" }
-      isDone: { _eq: true }
-      grade: { _gte: 1 }
-      updatedAt: { _gt: $startDate, _lt: $endDate }
-      _not: { user: { roles: { slug: { _in: ["admin", $adminRole] } } } }
-    }
-    distinct_on: [userId]
-  ) {
-    aggregate { count }
-  }
-  
-  registration_user{ #checkin, piscine
-    userLogin
-    registration{
-      path
-      id
-    }
-  }
-  
-}
-
-
-готовый скрипт по астане
-query onboarding_games_stats(
-  $startDate: timestamptz!
-  $endDate: timestamptz!
-) {
-  total_astana: user_aggregate{ 
-    aggregate {
-      count
-    }
-  }
-  succeeded_astana: progress_aggregate(
-    where: {
-      path: { _eq: "/astanahub/onboarding/games" }
-      isDone: { _eq: true }
-      grade: { _gte: 1 }
-      updatedAt: { _gt: $startDate, _lt: $endDate }
-      _not: { user: { roles: { slug: { _in: ["admin", "campus_admin_astanahub"] } } } }
-    }
-    distinct_on: [userId]
-  ) {
-    aggregate { count }
-  }
-  
-  checkin_astana: registration_user_aggregate(
-    where: {
-      registration:{path: {_eq: "/astanahub/onboarding/checkin"}}
-    }
-  ){
-    aggregate{
-      count
-    }
-  }
-  
-  piscinego_astana: registration_user_aggregate(
-    where: {
-      registration:{path: {_eq: "/astanahub/piscinego"}}
-    }
-  ){
-    aggregate{
-      count
-    }
-  }
-}
+docker compose up -d --build
+docker compose logs -f
+docker compose down

@@ -1,4 +1,6 @@
+# Secrets and runtime state — never commit.
 .env
 credentials.json
-.json
+
+# Access store (approved-admin allowlist) is runtime data, kept out of git.
 data/
